@@ -23,7 +23,7 @@
  *
  * After finishing the use of the version, the reader must release it. During release,
  * the reader increments the inner reference counter by 1. If the resulting inner
- * counter becomes 0, it indicates that no other threads are referencing that
+ * counter is 0, it indicates that no other threads are referencing that
  * version, so it can be freed.
  *
  * In the version replacement process, the writer atomically exchanges the 8-byte
