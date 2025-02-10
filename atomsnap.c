@@ -11,7 +11,7 @@
 #define OUTER_REF_CNT	(0x0001000000000000ULL)
 #define OUTER_REF_MASK	(0xffff000000000000ULL)
 #define OUTER_PTR_MASK	(0x0000ffffffffffffULL)
-#define OUTER_REF_SHIFT	(16)
+#define OUTER_REF_SHIFT	(48)
 
 #define GET_OUTER_REFCNT(outer) ((outer & OUTER_REF_MASK) >> OUTER_REF_SHIFT)
 #define GET_OUTER_PTR(outer)	(outer & OUTER_PTR_MASK)
