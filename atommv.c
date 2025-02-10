@@ -12,7 +12,7 @@
  *   - Lower 48 bits: index pointer of the current version.
  *
  * Writers have their own version and each version can be concurrently read by
- * multiple readers. If a writer were to simply deallocate an old version to
+ * multiple readers. If a writer simply deallocates an old version to
  * replace it, readerse might access wrong memory. To avoid this, multiple
  * versions are maintained.
  * 
