@@ -22,7 +22,7 @@
  * count was increased. This allows the reader to obtain both the version
  * pointer and ensure that the reference counter is safely increased.
  *
- * After finishing the use of a version, a reader must release it. During release,
+ * After finishing the use of the version, the reader must release it. During release,
  * the reader increments the inner reference counter by 1. If the resulting inner
  * counter becomes 0, it indicates that no other threads are referencing that
  * version, so it can be freed.
