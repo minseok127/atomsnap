@@ -46,7 +46,7 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
 
 # Usage
 
-### Common (reader, writer)
+### Common (shared by readers and writers)
 ```
 {
   /* Open the gate for the object to be managed with multiple versions */
