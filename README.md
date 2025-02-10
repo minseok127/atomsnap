@@ -74,6 +74,9 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
   new_version = (struct atommv_version *)malloc(sizeof(atommv_version));
   atommv_set_object(new_version, new_object);
   
+  /*
+   * If unconditional version replacement is allowed
+   */
   old_version = atommv_test_and_set(gate, new_version, &s);
   if (s == ATOMMV_SAFE_FREE) {
     free(old_version);
