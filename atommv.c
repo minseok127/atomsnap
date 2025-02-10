@@ -20,7 +20,7 @@
  * the outer reference counter using fetch_add(). The returned 64-bit value has
  * its lower 48-bits representing the pointer of the version whose reference
  * count was increased. This allows the reader to obtain the version
- * pointer and ensure the reference counter is increased atomically.
+ * pointer and ensure the reference counter is increased at the same time.
  *
  * After finishing the use of the version, the reader must release it. During release,
  * the reader increments the inner reference counter by 1. If the resulting inner
