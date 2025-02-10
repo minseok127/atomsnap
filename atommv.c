@@ -176,7 +176,7 @@ ATOMMV_STATUS atommv_release(struct atommv_version *version)
  * @old_version_status: pointer to return the old verion's status
  *
  * This function atomically exchanges the current version with a new one using
- * atomic_exchange). It then extracts the outer reference count and substracts
+ * atomic_exchange. It then extracts the outer reference count and substracts
  * the old version's inner reference cuonter. The result indicates whether the
  * old version is safe to free.
  *
