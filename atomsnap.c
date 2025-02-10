@@ -113,7 +113,7 @@ struct atomsnap *atomsnap_test_and_set(
 	return old_snapshot;
 }
 
-bool atoimc_snapshot_compare_and_exchange(struct atomsnap_gate *gate,
+bool atomsnap_compare_and_exchange(struct atomsnap_gate *gate,
 	struct atomsnap *old_snapshot, struct atomsnap *new_snapshot,
 	int *old_snapshot_status)
 {
