@@ -268,7 +268,7 @@ bool atommv_compare_and_exchange(struct atommv_gate *gate,
 
 	/* The outer counter has been wraparouned, adjust inner count */
 	if (inner_refcnt > 0) {
-		inner_refcnt = atomic_fetch_sib(&old_version->inner_refcnt,
+		inner_refcnt = atomic_fetch_sub(&old_version->inner_refcnt,
 			MAX_REF_DIFF) - MAX_REF_DIFF;
 	}
 	assert(inner_refcnt <= 0);
