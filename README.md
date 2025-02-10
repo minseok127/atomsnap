@@ -72,7 +72,7 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
   ATOMMV_STATUS s;
 
   new_version = (struct atommv_version *)malloc(sizeof(atommv_version));
-  atommv_set_version(new_version, new_object);
+  atommv_set_object(new_version, new_object);
   
   old_version = atommv_test_and_set(gate, new_version, &s);
   if (s == ATOMMV_SAFE_FREE) {
