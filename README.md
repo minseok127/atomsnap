@@ -2,7 +2,7 @@
 
 This library is designed to atomically manage multiple versions of a specific object in a multi-threaded environment. It provides wait-free access to atomic versions and ensures the safe freeing of versions. Readers obtain a pointer immediately without failure. Writers can decide whether to update the pointer instantly without failure using TAS or to use CAS with a retry mechanism, depending on the requirements of the application.
 
-Acquiring and releasing a version are performed as a pair. It is recommended to avoid repeatedly acquiring without releasing. If the difference between the number of acquisitions and releases for the same version exceeds the range that can be represented by uint16, the behavior becomes unpredictable.
+Acquiring and releasing a version should always be done as a pair. Avoid acquiring repeatedly without releasing. If the gap between acquisitions and releases for the same version exceeds the range of uint16, the behavior becomes unpredictable.
 
 ## Build
 ```
