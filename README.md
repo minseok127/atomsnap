@@ -1,4 +1,4 @@
-# ATOMMV
+# ATOMSNAP
 
 This library is designed to atomically manage multiple versions of a specific object in a multi-threaded environment. It provides wait-free access to atomic versions and ensures the safe freeing of versions. Multiple readers obtain a pointer immediately without failure. Multiple writers can decide whether to update the pointer instantly without failure using TAS or to use CAS with a retry mechanism, depending on the requirements of the application.
 
@@ -8,38 +8,38 @@ Note that this library is implemented under the assumption that user virtual mem
 
 # Build
 ```
-$ git clone https://github.com/minseok127/atommv.git
-$ cd atommv
+$ git clone https://github.com/minseok127/atomsnap.git
+$ cd atomsnap
 $ make
-=> libatommv.a, libatommv.so, atommv.h
+=> libatomsnap.a, libatomsnap.so, atomsnap.h
 ```
 
 # API
 ```
 typedef enum {
-	ATOMMV_SAFE_FREE,
-	ATOMMV_UNSAFE_FREE,
-} ATOMMV_STATUS;
+	ATOMSNAP_SAFE_FREE,
+	ATOMSNAP_UNSAFE_FREE,
+} ATOMSNAP_STATUS;
 
-struct atommv_gate *atommv_init_gate(void);
+struct atomsnap_gate *atomsnap_init_gate(void);
 
-void atommv_destroy_gate(struct atommv_gate *g);
+void atomsnap_destroy_gate(struct atomsnap_gate *g);
 
-void *atommv_get_object(struct atommv_version *v);
+void *atomsnap_get_object(struct atomsnap_version *v);
 
-void atommv_set_object(struct atommv_version *v, void *object);
+void atomsnap_set_object(struct atomsnap_version *v, void *object);
 
-struct atommv_version *atommv_acquire(struct atommv_gate *g);
+struct atomsnap_version *atomsnap_acquire(struct atomsnap_gate *g);
 
-ATOMMV_STATUS atommv_release(struct atommv_version *v);
+ATOMSNAP_STATUS atomsnap_release(struct atomsnap_version *v);
 
-struct atommv_version *atommv_test_and_set(
-	struct atommv_gate *g, struct atommv_version *v,
-	ATOMMV_STATUS *old_version_status);
+struct atomsnap_version *atomsnap_test_and_set(
+	struct atomsnap_gate *g, struct atomsnap_version *v,
+	ATOMSNAP_STATUS *old_version_status);
 
-bool atommv_compare_and_exchange(struct atommv_gate *g,
-	struct atommv_version *oldv, struct atommv_version *newv,
-	ATOMMV_STATUS *old_version_status);
+bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
+	struct atomsnap_version *oldv, struct atomsnap_version *newv,
+	ATOMSNAP_STATUS *old_version_status);
 ```
 
 # Usage
@@ -48,25 +48,25 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
 ```
 {
   /* Open the gate for the object to be managed with multiple versions */
-  struct atommv_gate *gate = atommv_init_gate();
+  struct atomsnap_gate *gate = atomsnap_init_gate();
 
   ...
 
   /* Done */
-  atommv_destroy_gate(gate);
+  atomsnap_destroy_gate(gate);
 }
 ```
 
 ### Reader
 ```
 {
-  atommv_version *current_version = atommv_acquire(gate);
-  void *object = atommv_get_object(current_version);
+  atomsnap_version *current_version = atomsnap_acquire(gate);
+  void *object = atomsnap_get_object(current_version);
 
   ...
 
-  ATOMMV_STATUS s = atommv_release(current_version):
-  if (s == ATOMMV_SAFE_FREE) {
+  ATOMSNAP_STATUS s = atomsnap_release(current_version):
+  if (s == ATOMSNAP_SAFE_FREE) {
     free(current_version);
   }
 }
@@ -75,17 +75,17 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
 ### Writer (TAS)
 ```
 {
-  atommv_version *old_version, *new_version;
-  ATOMMV_STATUS s;
+  atomsnap_version *old_version, *new_version;
+  ATOMSNAP_STATUS s;
 
-  new_version = (struct atommv_version *)malloc(sizeof(atommv_version));
-  atommv_set_object(new_version, new_object);
+  new_version = (struct atomsnap_version *)malloc(sizeof(atomsnap_version));
+  atomsnap_set_object(new_version, new_object);
   
   /*
    * If unconditional version replacement is allowed
    */
-  old_version = atommv_test_and_set(gate, new_version, &s);
-  if (s == ATOMMV_SAFE_FREE) {
+  old_version = atomsnap_test_and_set(gate, new_version, &s);
+  if (s == ATOMSNAP_SAFE_FREE) {
     free(old_version);
   }
 }
@@ -94,29 +94,29 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
 ### Writer (CAS)
 ```
 {
-  atommv_version *latest_version, *new_version;
-  ATOMMV_STATUS s;
+  atomsnap_version *latest_version, *new_version;
+  ATOMSNAP_STATUS s;
 
   /* 
    * If the new version must be created exactly from the latest version
    */
   for (;;) {
-    latest_version = atommv_acquire(gate);
+    latest_version = atomsnap_acquire(gate);
     new_version = make_new_version(latest_version);
-    s = atommv_release(latest_version);
+    s = atomsnap_release(latest_version);
 
     /*
      * If latest_version can be freed, it means that another new version has been 
      * registered. So our new_version cannot be registered because it is no longer
      * based on the lasted version (another thread's new version)
      */
-    if (s == ATOMMV_SAFE_FREE) {
+    if (s == ATOMSNAP_SAFE_FREE) {
         free(latest_version);
         continue;
     }
 
-    if (atommv_compare_and_exchange(gate, latest_version, new_version, &s)) {
-      if (s == ATOMMV_SAFE_FREE) {
+    if (atomsnap_compare_and_exchange(gate, latest_version, new_version, &s)) {
+      if (s == ATOMSNAP_SAFE_FREE) {
         free(latest_version);
       }
       break;
