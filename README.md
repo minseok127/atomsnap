@@ -87,31 +87,31 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
 ### Writer (CAS)
 ```
 {
-  atommv_version *current_version, *new_version;
+  atommv_version *latest_version, *new_version;
   ATOMMV_STATUS s;
 
   /* 
-   * If the new version must be created exactly from the current version 
+   * If the new version must be created exactly from the latest version 
    * and be registered
    */
   for (;;) {
-    current_version = atommv_acquire(gate);
-    new_version = make_new_version(current_version);
-    s = atommv_release(current_version);
+    latest_version = atommv_acquire(gate);
+    new_version = make_new_version(latest_version);
+    s = atommv_release(latest_version);
 
     /*
-     * If old_version can be freed, it means that another new version has been 
+     * If latest_version can be freed, it means that another new version has been 
      * registered. This implies that our new_version cannot be registered because
      * our new_version would no longer be created from the latest version.
      */
     if (s == ATOMMV_SAFE_FREE) {
-        free(current_version);
+        free(latest_version);
         continue;
     }
 
-    if (atommv_compare_and_exchange(gate, current_version, new_version, &s)) {
+    if (atommv_compare_and_exchange(gate, latest_version, new_version, &s)) {
       if (s == ATOMMV_SAFE_FREE) {
-        free(current_version);
+        free(latest_version);
       }
       break;
     }
