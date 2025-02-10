@@ -88,7 +88,9 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
   void *old_object, new_object;
   ATOMMV_STATUS s;
 
-  /* If the new version must be created from the current version */
+  /* 
+   * If the new version must be created from the current version
+   */
   for (;;) {
     old_version = atommv_acquire(gate);
     new_version = make_new_version(old_version);
@@ -97,6 +99,7 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
     /*
      * If old_version can be freed, it means that another new version has been 
      * registered. This implies that our new_version cannot be registered.
+     * Because our new_version would no longer be created from the current version.
      */
     if (s == ATOMMV_SAFE_FREE) {
         free(old_version);
