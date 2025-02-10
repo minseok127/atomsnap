@@ -1,5 +1,8 @@
 ## ATOMMV
-Wait-free atomic multi-version concurrency control
+
+This library is designed to atomically manage multiple versions of a specific object in a multi-threaded environment. It provides wait-free access to atomic versions and ensures the safe freeing of versions.
+
+Acquiring and releasing a version are performed as a pair. It is recommended to avoid repeatedly acquiring without releasing. If the difference between the number of acquisitions and releases exceeds the range that can be represented by uint16, the behavior becomes unpredictable.
 
 ## Build
 ```
