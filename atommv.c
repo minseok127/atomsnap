@@ -9,7 +9,7 @@
  *
  * The 8-byte control block in atommv_gate is structured as follows:
  *   - Upper 16 bits: outer reference counter.
- *   - Lower 48 bits: index (or pointer) of the current version.
+ *   - Lower 48 bits: index pointer of the current version.
  *
  * Writers have their own version and each version can be concurrently read by
  * multiple readers. If a writer were to simply deallocate an old version to
