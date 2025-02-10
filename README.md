@@ -4,7 +4,7 @@ This library is designed to atomically manage multiple versions of a specific ob
 
 Acquiring and releasing a version should always be done as a pair. Avoid acquiring repeatedly without releasing. If the gap between acquisitions and releases for the same version exceeds the range of uint16_t (0xffff), the behavior becomes unpredictable. However, as long as this gap does not widen, there are no restrictions on accessing the same version. 
 
-Note that this library is implemented under the assumption that user virtual memory address is limited to 48 bits. If virtual memory address beyond this range is used, additional implementation is required.
+Note that this library is implemented under the assumption that user virtual memory address is limited to 48 bits. Using virtual memory beyond this range requires additional implementation.
 
 # Build
 ```
