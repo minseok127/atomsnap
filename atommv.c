@@ -58,8 +58,9 @@
 #define GET_OUTER_REFCNT(outer) ((outer & OUTER_REF_MASK) >> OUTER_REF_SHIFT)
 #define GET_OUTER_PTR(outer)	(outer & OUTER_PTR_MASK)
 
-/* Maximum difference between outer counter and inner counter */
-#define MAX_REF_DIFF (0xffffULL)
+/* Difference between outer counter and inner counter must be <= 0xffff */
+#define WRAPAROUND_FACTOR (0x10000ULL)
+#define WRAPAROUND_MASK    (0xffffULL)
 
 /*
  * atommv_version - version object structure
@@ -202,7 +203,7 @@ struct atommv_version *atommv_test_and_set(
 	old_version = (struct atommv_version *)GET_OUTER_PTR(old_outer);
 
 	/* Consider wrapaound */
-	atomic_fetch_and(&old_version->inner_refcnt, MAX_REF_DIFF);
+	atomic_fetch_and(&old_version->inner_refcnt, WRAPAROUND_MASK);
 
 	/* Decrease inner ref counter, we expect the result is minus */
 	inner_refcnt = atomic_fetch_sub(&old_version->inner_refcnt,
@@ -211,7 +212,7 @@ struct atommv_version *atommv_test_and_set(
 	/* The outer counter has been wraparouned, adjust inner count */
 	if (inner_refcnt > 0) {
 		inner_refcnt = atomic_fetch_sub(&old_version->inner_refcnt,
-			MAX_REF_DIFF) - MAX_REF_DIFF;
+			WRAPAROUND_FACTOR) - WRAPAROUND_FACTOR;
 	}
 	assert(inner_refcnt <= 0);
 
@@ -260,7 +261,7 @@ bool atommv_compare_and_exchange(struct atommv_gate *gate,
 	}
 
 	/* Consider wrapaound */
-	atomic_fetch_and(&old_version->inner_refcnt, MAX_REF_DIFF);
+	atomic_fetch_and(&old_version->inner_refcnt, WRAPAROUND_MASK);
 
 	/* Decrease inner ref counter, we expect the result minus */
 	inner_refcnt = atomic_fetch_sub(&old_version->inner_refcnt,
@@ -269,7 +270,7 @@ bool atommv_compare_and_exchange(struct atommv_gate *gate,
 	/* The outer counter has been wraparouned, adjust inner count */
 	if (inner_refcnt > 0) {
 		inner_refcnt = atomic_fetch_sub(&old_version->inner_refcnt,
-			MAX_REF_DIFF) - MAX_REF_DIFF;
+			WRAPAROUND_FACTOR) - WRAPAROUND_FACTOR;
 	}
 	assert(inner_refcnt <= 0);
 
