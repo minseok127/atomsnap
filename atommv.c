@@ -63,8 +63,7 @@
  * @inner_refcnt: atomic inner reference counter for the version
  * @object: pointer to the actual data.
  *
- * atommv->inner_refcnt is used to determine when it is safe to free the
- * version.
+ * atommv_version->inner_refcnt is used to determine when it is safe to free.
  */
 struct atommv_version {
 	_Atomic int64_t inner_refcnt;
