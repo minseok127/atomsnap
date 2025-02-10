@@ -2,7 +2,7 @@
  * atommv.c - Atomic multi-version concurrency control library
  *
  * This file implements an mvcc mechanism for managing a pointer to a consistent
- * state along with reference counts. The design packs an outer reference cuont
+ * state along with reference counts. The design packs an outer reference count
  * and a version pointer into a single 64-bit control block stored in the
  * atommv_gate structure, while the version itself (atommv_version) maintains an
  * inner reference count.
