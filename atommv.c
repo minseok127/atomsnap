@@ -204,7 +204,7 @@ struct atommv_version *atommv_test_and_set(
 	/* Consider wrapaound */
 	atomic_fetch_and(&old_version->inner_refcnt, MAX_REF_DIFF);
 
-	/* Decrease inner ref counter, we expect it minus */
+	/* Decrease inner ref counter, we expect the result is minus */
 	inner_refcnt = atomic_fetch_sub(&old_version->inner_refcnt,
 		old_outer_refcnt) - old_outer_refcnt;
 
@@ -262,7 +262,7 @@ bool atommv_compare_and_exchange(struct atommv_gate *gate,
 	/* Consider wrapaound */
 	atomic_fetch_and(&old_version->inner_refcnt, MAX_REF_DIFF);
 
-	/* Decrease inner ref counter, we expect it minus */
+	/* Decrease inner ref counter, we expect the result minus */
 	inner_refcnt = atomic_fetch_sub(&old_version->inner_refcnt,
 		old_outer_refcnt) - old_outer_refcnt;
 
