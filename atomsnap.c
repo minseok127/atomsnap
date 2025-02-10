@@ -1,13 +1,13 @@
 /*
- * atommv.c - Atomic multi-version concurrency control library
+ * atomsnap.c - Atomic multi-version concurrency control library
  *
  * This file implements an mvcc mechanism for managing a pointer to a consistent
  * state along with reference counts. The design packs an outer reference count
  * and a version pointer into a single 64-bit control block stored in the
- * atommv_gate structure, while the version itself (atommv_version) maintains an
+ * atomsnap_gate structure, while the version itself (atomsnap_version) maintains an
  * inner reference count.
  *
- * The 8-byte control block in atommv_gate is structured as follows:
+ * The 8-byte control block in atomsnap_gate is structured as follows:
  *   - Upper 16 bits: outer reference counter.
  *   - Lower 48 bits: pointer of the current version.
  *
@@ -47,7 +47,7 @@
 
 #include <assert.h>
 
-#include "atommv.h"
+#include "atomsnap.h"
 
 #define OUTER_REF_CNT	(0x0001000000000000ULL)
 #define OUTER_REF_MASK	(0xffff000000000000ULL)
@@ -62,37 +62,37 @@
 #define WRAPAROUND_MASK    (0xffffULL)
 
 /*
- * atommv_version - version object structure
+ * atomsnap_version - version object structure
  * @inner_refcnt: atomic inner reference counter for the version
  * @object: pointer to the actual data.
  *
- * atommv_version->inner_refcnt is used to determine when it is safe to free.
+ * atomsnap_version->inner_refcnt is used to determine when it is safe to free.
  */
-struct atommv_version {
+struct atomsnap_version {
 	_Atomic int64_t inner_refcnt;
 	void *object;
 };
 
 /*
- * atommv_gate - gate for atomic version read/write
+ * atomsnap_gate - gate for atomic version read/write
  * @outer_refcnt_and_ptr: control block to manage multi-versions
  *
- * Writers use atommv_gate to atomically register their object version.
+ * Writers use atomsnap_gate to atomically register their object version.
  * Readers also use this gate to get the object and release safely.
  */
-struct atommv_gate {
+struct atomsnap_gate {
 	_Atomic uint64_t outer_refcnt_and_ptr;
 };
 
 /*
- * Returns pointer to a atommv_gate, or NULL on failure.
+ * Returns pointer to a atomsnap_gate, or NULL on failure.
  */
-struct atommv_gate *atommv_init_gate()
+struct atomsnap_gate *atomsnap_init_gate()
 {
-	atommv_gate *gate = calloc(1, sizeof(atommv_gate));
+	atomsnap_gate *gate = calloc(1, sizeof(atomsnap_gate));
 
 	if (gate == NULL) {
-		fprintf(stderr, "atommv_init_gate: gate allocation failed\n");
+		fprintf(stderr, "atomsnap_init_gate: gate allocation failed\n");
 		return NULL;
 	}
 
@@ -100,9 +100,9 @@ struct atommv_gate *atommv_init_gate()
 }
 
 /*
- * Free the atommv_gate.
+ * Free the atomsnap_gate.
  */
-void atommv_destroy_gate(struct atommv_gate *gate)
+void atomsnap_destroy_gate(struct atomsnap_gate *gate)
 {
 	if (gate == NULL)
 		return;
@@ -113,7 +113,7 @@ void atommv_destroy_gate(struct atommv_gate *gate)
 /*
  * Get the actual object from the version.
  */
-void *atommv_get_object(struct atommv_version *version)
+void *atomsnap_get_object(struct atomsnap_version *version)
 {
 	if (version == NULL)
 		return NULL;
@@ -124,7 +124,7 @@ void *atommv_get_object(struct atommv_version *version)
 /*
  * Set the object pointer into the given version.
  */
-void atommv_set_object(struct atommv_version *version, void *obj)
+void atomsnap_set_object(struct atomsnap_version *version, void *obj)
 {
 	if (version == NULL)
 		return;
@@ -134,13 +134,13 @@ void atommv_set_object(struct atommv_version *version, void *obj)
 }
 
 /*
- * atommv_acquire - atomically acquire the current version
- * @gate: poinetr of the atommv_gate
+ * atomsnap_acquire_version - atomically acquire the current version
+ * @gate: poinetr of the atomsnap_gate
  *
  * Atomically increments the outer reference counter and get the pointer of the
  * current version.
  */
-struct atommv_version *atommv_acquire(struct atommv_gate *gate)
+struct atomsnap_version *atomsnap_acquire_version(struct atomsnap_gate *gate)
 {
 	uint64_t outer;
 
@@ -149,35 +149,35 @@ struct atommv_version *atommv_acquire(struct atommv_gate *gate)
 
 	outer = atomic_fetch_add(&gate->outer_refcnt_and_ptr, OUTER_REF_CNT);
 
-	return (struct atommv_version *)GET_OUTER_PTR(outer);
+	return (struct atomsnap_version *)GET_OUTER_PTR(outer);
 }
 
 /*
- * atommv_release - release the given version after usage
- * @version: pointer to atommv_version being released
+ * atomsnap_release_version - release the given version after usage
+ * @version: pointer to atomsnap_version being released
  *
  * Release the version by incrementing the inner reference count by 1. If the
  * updated inner counter was 0, it indicates that no other threads reference
  * this version and it can be safely freed.
  *
- * Return ATOMMV_SAFE_FREE if the version is safe to free, ATOMMV_UNSAFE_FREE
+ * Return ATOMSNAP_SAFE_FREE if the version is safe to free, ATOMSNAP_UNSAFE_FREE
  * otherwise.
  */
-ATOMMV_STATUS atommv_release(struct atommv_version *version)
+ATOMSNAP_STATUS atomsnap_release_version(struct atomsnap_version *version)
 {
 	int64_t inner_refcnt
 		= atomic_fetch_add(&version->inner_refcnt, 1) + 1;
 
 	if (inner_refcnt == 0) {
-		return ATOMMV_SAFE_FREE;
+		return ATOMSNAP_SAFE_FREE;
 	}
 
-	return ATOMMV_UNSAFE_FREE;
+	return ATOMSNAP_UNSAFE_FREE;
 }
 
 /*
- * atommv_test_and_set - atomically repalce the version
- * @gate: pointer to the atommv_gate
+ * atomsnap_test_and_set - atomically repalce the version
+ * @gate: pointer to the atomsnap_gate
  * @version: new version to install
  * @old_version_status: pointer to return the old verion's status
  *
@@ -188,18 +188,18 @@ ATOMMV_STATUS atommv_release(struct atommv_version *version)
  *
  * Returns the old version's pointer.
  */
-struct atommv_version *atommv_test_and_set(
-	struct atommv_gate *gate, struct atommv_version *new_version,
-	ATOMMV_STATUS *old_version_status)
+struct atomsnap_version *atomsnap_test_and_set(
+	struct atomsnap_gate *gate, struct atomsnap_version *new_version,
+	ATOMSNAP_STATUS *old_version_status)
 {
 	uint64_t old_outer, old_outer_refcnt;
-	struct atommv_version *old_version;
+	struct atomsnap_version *old_version;
 	int64_t inner_refcnt;
 
 	old_outer = atomic_exchange(&gate->outer_refcnt_and_ptr, 
 		(uint64_t)new_version);
 	old_outer_refcnt = GET_OUTER_REFCNT(old_outer);
-	old_version = (struct atommv_version *)GET_OUTER_PTR(old_outer);
+	old_version = (struct atomsnap_version *)GET_OUTER_PTR(old_outer);
 
 	/* Consider wrapaound */
 	atomic_fetch_and(&old_version->inner_refcnt, WRAPAROUND_MASK);
@@ -216,17 +216,17 @@ struct atommv_version *atommv_test_and_set(
 	assert(inner_refcnt <= 0);
 
 	if (inner_refcnt == 0) {
-		*old_version_status = ATOMMV_SAFE_FREE;
+		*old_version_status = ATOMSNAP_SAFE_FREE;
 	} else {
-		*old_version_status = ATOMMV_UNSAFE_FREE;
+		*old_version_status = ATOMSNAP_UNSAFE_FREE;
 	}
 
 	return old_version;
 }
 
 /*
- * atommv_compare_and_exchange - conditonally replace the version
- * @gate: pointer to the atommv_gate
+ * atomsnap_compare_and_exchange - conditonally replace the version
+ * @gate: pointer to the atomsnap_gate
  * @old_version: expected pointer of current version
  * @new_version: new version to install
  * @old_version_status: pointer to return the old verion's status
@@ -238,9 +238,9 @@ struct atommv_version *atommv_test_and_set(
  *
  * Return true if the version was successfully replace; false otherwise.
  */
-bool atommv_compare_and_exchange(struct atommv_gate *gate,
-	struct atommv_version *old_version, struct atommv_version *new_version,
-	ATOMMV_STATUS *old_version_status)
+bool atomsnap_compare_and_exchange(struct atomsnap_gate *gate,
+	struct atomsnap_version *old_version, struct atomsnap_version *new_version,
+	ATOMSNAP_STATUS *old_version_status)
 {
 	uint64_t old_outer, old_outer_refcnt;
 	int64_t inner_refcnt;
@@ -248,14 +248,14 @@ bool atommv_compare_and_exchange(struct atommv_gate *gate,
 	old_outer = atomic_load(&gate->outer_refcnt_and_ptr);
 	old_outer_refcnt = GET_OUTER_REFCNT(old_outer);
 
-	if (old_version != (struct atommv_version *)GET_OUTER_PTR(old_outer)) {
-		*old_version_status = ATOMMV_UNSAFE_FREE;
+	if (old_version != (struct atomsnap_version *)GET_OUTER_PTR(old_outer)) {
+		*old_version_status = ATOMSNAP_UNSAFE_FREE;
 		return false;
 	}
 
 	if (!atomic_compare_exchange_weak(&gate->outer_refcnt_and_ptr,
 			&old_outer, (uint64_t)new_version)) {
-		*old_version_status = ATOMMV_UNSAFE_FREE;
+		*old_version_status = ATOMSNAP_UNSAFE_FREE;
 		return false;
 	}
 
@@ -274,9 +274,9 @@ bool atommv_compare_and_exchange(struct atommv_gate *gate,
 	assert(inner_refcnt <= 0);
 
 	if (inner_refcnt == 0) {
-		*old_version_status = ATOMMV_SAFE_FREE;
+		*old_version_status = ATOMSNAP_SAFE_FREE;
 	} else {
-		*old_version_status = ATOMMV_UNSAFE_FREE;
+		*old_version_status = ATOMSNAP_UNSAFE_FREE;
 	}
 
 	return true;
