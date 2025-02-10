@@ -105,8 +105,8 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
 
     /*
      * If latest_version can be freed, it means that another new version has been 
-     * registered. This implies that our new_version cannot be registered because
-     * our new_version would no longer be created from the current latest version
+     * registered. So our new_version cannot be registered because it is no longer
+     * created from the current lasted version
      */
     if (s == ATOMMV_SAFE_FREE) {
         free(latest_version);
