@@ -112,8 +112,8 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
     if (atommv_compare_and_exchange(gate, current_version, new_version, &s)) {
       if (s == ATOMMV_SAFE_FREE) {
         free(current_version);
-        break;
       }
+      break;
     }
 
     /* Another version has been registered, try again */
