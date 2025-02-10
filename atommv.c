@@ -55,18 +55,21 @@
 #define OUTER_PTR_MASK	(0x0000ffffffffffffULL)
 #define OUTER_REF_SHIFT	(48)
 
+#define MAX_OUTER_REF_CNT (0xffffULL)
 #define GET_OUTER_REFCNT(outer) ((outer & OUTER_REF_MASK) >> OUTER_REF_SHIFT)
 #define GET_OUTER_PTR(outer)	(outer & OUTER_PTR_MASK)
 
 /*
  * atommv_version - version object structure
  * @inner_refcnt: atomic inner reference counter for the version
+ * @wraparound_cnt: how many wraparound is occured in the outer ref counter.
  * @object: pointer to the actual data.
  *
  * atommv_version->inner_refcnt is used to determine when it is safe to free.
  */
 struct atommv_version {
 	_Atomic int64_t inner_refcnt;
+	_Atomic uint64_t wraparound_cnt;
 	void *object;
 };
 
@@ -124,7 +127,10 @@ void atommv_set_object(struct atommv_version *version, void *obj)
 {
 	if (version == NULL)
 		return;
-	version->object = obj;
+	
+	atomic_store(&version->object, obj);
+	atomic_store(&version->inner_refcnt, 0);
+	atomic_store(&version->wraparound_cnt, 0);
 }
 
 /*
@@ -137,13 +143,21 @@ void atommv_set_object(struct atommv_version *version, void *obj)
 struct atommv_version *atommv_acquire(
 	struct atommv_gate *gate)
 {
-	uint64_t outer;
+	struct atommv_version *version;
+	uint64_t outer, outer_refcnt;
 
 	if (gate == NULL)
 		return NULL;
 
 	outer = atomic_fetch_add(&gate->outer_refcnt_and_ptr, OUTER_REF_CNT);
-	return (struct atommv_version *)GET_OUTER_PTR(outer);
+	outer_refcnt = GET_OUTER_REFCNT(outer);
+	version = (struct atommv_version *)GET_OUTER_PTR(outer);
+
+	if (outer_refcnt == MAX_OUTER_REFCNT) {
+		atomic_fetch_add(&version->wraparound_cnt, 1);
+	}
+
+	return version;
 }
 
 /*
@@ -192,8 +206,9 @@ struct atommv_version *atommv_test_and_set(
 
 	old_outer = atomic_exchange(&gate->outer_refcnt_and_ptr, 
 		(uint64_t)new_version);
-	old_outer_refcnt = GET_OUTER_REFCNT(old_outer);
 	old_version = (struct atommv_version *)GET_OUTER_PTR(old_outer);
+	old_outer_refcnt = GET_OUTER_REFCNT(old_outer)
+		+ old_version->wraparound_cnt * MAX_OUTER_REF_CNT;
 	
 	old_inner_refcnt = atomic_fetch_sub(&old_version->inner_refcnt,
 		old_outer_refcnt) - old_outer_refcnt;
@@ -237,7 +252,8 @@ bool atommv_compare_and_exchange(struct atommv_gate *gate,
 			&old_outer, (uint64_t)new_version))
 		return false;
 
-	old_outer_refcnt = GET_OUTER_REFCNT(old_outer);
+	old_outer_refcnt = GET_OUTER_REFCNT(old_outer)
+		+ old_version->wraparound_cnt * MAX_OUTER_REF_CNT;
 	old_inner_refcnt = atomic_fetch_sub(&old_version->inner_refcnt,
 		old_outer_refcnt) - old_outer_refcnt;
 
