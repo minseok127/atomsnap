@@ -87,7 +87,7 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
 ### Writer (CAS)
 ```
 {
-  atommv_version *old_version, *new_version;
+  atommv_version *current_version, *new_version;
   ATOMMV_STATUS s;
 
   /* 
@@ -95,9 +95,9 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
    * and be registered
    */
   for (;;) {
-    old_version = atommv_acquire(gate);
-    new_version = make_new_version(old_version);
-    s = atommv_release(old_version);
+    current_version = atommv_acquire(gate);
+    new_version = make_new_version(current_version);
+    s = atommv_release(current_version);
 
     /*
      * If old_version can be freed, it means that another new version has been 
@@ -105,16 +105,18 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
      * our new_version would no longer be created from the latest version.
      */
     if (s == ATOMMV_SAFE_FREE) {
-        free(old_version);
+        free(current_version);
         continue;
     }
 
-    if (atommv_compare_and_exchange(gate, old_version, new_version, &s)) {
+    if (atommv_compare_and_exchange(gate, current_version, new_version, &s)) {
       if (s == ATOMMV_SAFE_FREE) {
-        free(old_version);
+        free(current_version);
         break;
       }
     }
+
+    /* Another version has been registered, try again */
   }
 }
 ```
