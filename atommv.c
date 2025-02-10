@@ -151,7 +151,7 @@ struct atommv_version *atommv_acquire(
  * @version: pointer to atommv_version being released
  *
  * Release the version by incrementing the inner reference count by 1. If the
- * updated inner counter becomes 0, it indicates that no other threads reference
+ * updated inner counter was 0, it indicates that no other threads reference
  * this version and it can be safely freed.
  *
  * Return ATOMMV_SAFE_FREE if the version is safe to free, ATOMMV_UNSAFE_FREE
