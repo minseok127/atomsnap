@@ -91,7 +91,8 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
   ATOMMV_STATUS s;
 
   /* 
-   * If the new version must be created from the current version
+   * If the new version must be created exactly from the current version 
+   * and be registered
    */
   for (;;) {
     old_version = atommv_acquire(gate);
