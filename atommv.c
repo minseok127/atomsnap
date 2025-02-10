@@ -32,11 +32,12 @@
  * which contains the previous outer reference count and version pointer, is
  * returned. Because this update is atomic, new readers cannot access the old
  * version anymore. The writer then decrements the old version's inner counter by the
- * outer reference count. Consequently, if a reader's release operation causes
- * the inner counter to reach 0, this reader is the last user of that version.
- * If the writer's release operation causes the inner counter to reach 0, this
- * writer is the last user of that version. Then the last user can free the old
- * version.
+ * outer reference count.
+ *
+ * Consequently, if a reader's release operation causes the inner counter to reach 0,
+ * this reader is the last user of that version. If the writer's release operation
+ * causes the inner counter to reach 0, this writer is the last user of that version.
+ * Then the last user can free the old version.
  */
 
 #include <stdio.h>
