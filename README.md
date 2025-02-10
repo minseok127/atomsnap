@@ -88,7 +88,6 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
 ```
 {
   atommv_version *old_version, *new_version;
-  void *old_object, new_object;
   ATOMMV_STATUS s;
 
   /* 
