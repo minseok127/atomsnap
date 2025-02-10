@@ -227,6 +227,7 @@ bool atommv_compare_and_exchange(struct atommv_gate *gate,
 	uint64_t old_outer, old_outer_refcnt;
 	int64_t old_inner_refcnt;
 
+	*old_version_status = ATOMMV_UNSAFE_FREE; /* initialize before return */
 	old_outer = atomic_load(&gate->outer_refcnt_and_ptr);
 
 	if (old_version != (struct atommv_version *)GET_OUTER_PTR(old_outer))
@@ -242,8 +243,6 @@ bool atommv_compare_and_exchange(struct atommv_gate *gate,
 
 	if (old_inner_refcnt == 0) {
 		*old_version_status = ATOMMV_SAFE_FREE;
-	} else {
-		*old_version_status = ATOMMV_UNSAFE_FREE;
 	}
 
 	return true;
