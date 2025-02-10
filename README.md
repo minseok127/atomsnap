@@ -29,9 +29,9 @@ void *atomsnap_get_object(struct atomsnap_version *v);
 
 void atomsnap_set_object(struct atomsnap_version *v, void *object);
 
-struct atomsnap_version *atomsnap_acquire(struct atomsnap_gate *g);
+struct atomsnap_version *atomsnap_acquire_version(struct atomsnap_gate *g);
 
-ATOMSNAP_STATUS atomsnap_release(struct atomsnap_version *v);
+ATOMSNAP_STATUS atomsnap_release_version(struct atomsnap_version *v);
 
 struct atomsnap_version *atomsnap_test_and_set(
 	struct atomsnap_gate *g, struct atomsnap_version *v,
@@ -60,12 +60,12 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
 ### Reader
 ```
 {
-  atomsnap_version *current_version = atomsnap_acquire(gate);
+  atomsnap_version *current_version = atomsnap_acquire_version(gate);
   void *object = atomsnap_get_object(current_version);
 
   ...
 
-  ATOMSNAP_STATUS s = atomsnap_release(current_version):
+  ATOMSNAP_STATUS s = atomsnap_release_version(current_version):
   if (s == ATOMSNAP_SAFE_FREE) {
     free(current_version);
   }
@@ -101,9 +101,9 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
    * If the new version must be created exactly from the latest version
    */
   for (;;) {
-    latest_version = atomsnap_acquire(gate);
+    latest_version = atomsnap_acquire_version(gate);
     new_version = make_new_version(latest_version);
-    s = atomsnap_release(latest_version);
+    s = atomsnap_release_version(latest_version);
 
     /*
      * If latest_version can be freed, it means that another new version has been 
