@@ -13,7 +13,7 @@
  *
  * Writers have their own version and each version can be concurrently read by
  * multiple readers. If a writer simply deallocates an old version to
- * replace it, readerse might access wrong memory. To avoid this, multiple
+ * replace it, readers might access wrong memory. To avoid this, multiple
  * versions are maintained.
  * 
  * When a reader wants to access the current version, it atomically increments
