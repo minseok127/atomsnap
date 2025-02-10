@@ -45,10 +45,12 @@ bool atommv_compare_and_exchange(struct atommv_gate *g,
 ### Common (reader, writer)
 ```
 {
+  /* Open the gate for the object to be managed with multiple versions */
   struct atommv_gate *gate = atommv_init_gate();
 
   ...
 
+  /* Done */
   atommv_destroy_gate(gate);
 }
 ```
