@@ -9,7 +9,7 @@
  *
  * The 8-byte control block in atommv_gate is structured as follows:
  *   - Upper 16 bits: outer reference counter.
- *   - Lower 48 bits: index pointer of the current version.
+ *   - Lower 48 bits: pointer of the current version.
  *
  * Writers have their own version and each version can be concurrently read by
  * multiple readers. If a writer simply deallocates an old version to
@@ -19,8 +19,8 @@
  * When a reader wants to access the current version, it atomically increments
  * the outer reference counter using fetch_add(). The returned 64-bit value has
  * its lower 48-bits representing the pointer of the version whose reference
- * count was increased. This allows the reader to obtain both the version
- * pointer and ensure that the reference counter is safely increased.
+ * count was increased. This allows the reader to obtain the version
+ * pointer and ensure the reference counter is increased atomically.
  *
  * After finishing the use of the version, the reader must release it. During release,
  * the reader increments the inner reference counter by 1. If the resulting inner
