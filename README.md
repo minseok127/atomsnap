@@ -52,7 +52,10 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
   /* Open the gate for the object to be managed with multiple versions */
   struct atomsnap_gate *gate = atomsnap_init_gate();
 
-  // If readers and writers operate on the same gate, they will use multiple versions of the same object.
+  /*
+   * If readers and writers operate on the same gate,
+   * they will use multiple versions of the same object.
+   */
 
   /* Done */
   atomsnap_destroy_gate(gate);
