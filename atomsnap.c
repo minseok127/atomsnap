@@ -104,8 +104,9 @@ struct atomsnap_gate *atomsnap_init_gate()
  */
 void atomsnap_destroy_gate(struct atomsnap_gate *gate)
 {
-	if (gate == NULL)
+	if (gate == NULL) {
 		return;
+	}
 
 	free(gate);
 }
@@ -115,8 +116,9 @@ void atomsnap_destroy_gate(struct atomsnap_gate *gate)
  */
 void *atomsnap_get_object(struct atomsnap_version *version)
 {
-	if (version == NULL)
+	if (version == NULL) {
 		return NULL;
+	}
 
 	return version->object;
 }
@@ -126,8 +128,9 @@ void *atomsnap_get_object(struct atomsnap_version *version)
  */
 void atomsnap_set_object(struct atomsnap_version *version, void *obj)
 {
-	if (version == NULL)
+	if (version == NULL) {
 		return;
+	}
 	
 	atomic_store(&version->object, obj);
 	atomic_store(&version->inner_refcnt, 0);
@@ -144,8 +147,9 @@ struct atomsnap_version *atomsnap_acquire_version(struct atomsnap_gate *gate)
 {
 	uint64_t outer;
 
-	if (gate == NULL)
+	if (gate == NULL) {
 		return NULL;
+	}
 
 	outer = atomic_fetch_add(&gate->outer_refcnt_and_ptr, OUTER_REF_CNT);
 
@@ -165,8 +169,13 @@ struct atomsnap_version *atomsnap_acquire_version(struct atomsnap_gate *gate)
  */
 ATOMSNAP_STATUS atomsnap_release_version(struct atomsnap_version *version)
 {
-	int64_t inner_refcnt
-		= atomic_fetch_add(&version->inner_refcnt, 1) + 1;
+	int64_t inner_refcnt;
+
+	if (version == NULL) {
+		return ATOMSNAP_UNSAFE_FREE;
+	}
+
+	inner_refcnt = atomic_fetch_add(&version->inner_refcnt, 1) + 1;
 
 	if (inner_refcnt == 0) {
 		return ATOMSNAP_SAFE_FREE;
@@ -200,6 +209,11 @@ struct atomsnap_version *atomsnap_test_and_set(
 		(uint64_t)new_version);
 	old_outer_refcnt = GET_OUTER_REFCNT(old_outer);
 	old_version = (struct atomsnap_version *)GET_OUTER_PTR(old_outer);
+	*old_version_status = ATOMSNAP_UNSAFE_FREE; /* initial status */
+
+	if (old_version == NULL) {
+		return NULL;
+	}
 
 	/* Consider wrapaound */
 	atomic_fetch_and(&old_version->inner_refcnt, WRAPAROUND_MASK);
@@ -217,8 +231,6 @@ struct atomsnap_version *atomsnap_test_and_set(
 
 	if (inner_refcnt == 0) {
 		*old_version_status = ATOMSNAP_SAFE_FREE;
-	} else {
-		*old_version_status = ATOMSNAP_UNSAFE_FREE;
 	}
 
 	return old_version;
@@ -247,16 +259,19 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *gate,
 
 	old_outer = atomic_load(&gate->outer_refcnt_and_ptr);
 	old_outer_refcnt = GET_OUTER_REFCNT(old_outer);
+	*old_version_status = ATOMSNAP_UNSAFE_FREE; /* initial status */
 
 	if (old_version != (struct atomsnap_version *)GET_OUTER_PTR(old_outer)) {
-		*old_version_status = ATOMSNAP_UNSAFE_FREE;
 		return false;
 	}
 
 	if (!atomic_compare_exchange_weak(&gate->outer_refcnt_and_ptr,
 			&old_outer, (uint64_t)new_version)) {
-		*old_version_status = ATOMSNAP_UNSAFE_FREE;
 		return false;
+	}
+
+	if (old_version == NULL) {
+		return true;
 	}
 
 	/* Consider wrapaound */
@@ -275,8 +290,6 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *gate,
 
 	if (inner_refcnt == 0) {
 		*old_version_status = ATOMSNAP_SAFE_FREE;
-	} else {
-		*old_version_status = ATOMSNAP_UNSAFE_FREE;
 	}
 
 	return true;
