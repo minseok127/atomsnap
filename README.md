@@ -107,7 +107,7 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
    */
   for (;;) {
     latest_version = atomsnap_acquire_version(gate);
-    new_version = make_new_version(latest_version);
+    new_version = make_new_version(latest_version); /* user function */
     s = atomsnap_release_version(latest_version);
 
     /*
