@@ -103,13 +103,18 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
 {
   atomsnap_version *latest_version, *new_version;
   ATOMSNAP_STATUS s;
+  void * object;
+
+  new_version = (struct atomsnap_version *)malloc(sizeof(atomsnap_version));
+  object = malloc(sizeof(object));
+  atomsnap_set_object(new_version, object);
 
   /* 
    * If the new version must be created exactly from the latest version
    */
   for (;;) {
     latest_version = atomsnap_acquire_version(gate);
-    new_version = // make your object based on the latest_version and set it into the new_version
+    // change your object based on the latest_version
     s = atomsnap_release_version(latest_version);
 
     /*
