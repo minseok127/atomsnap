@@ -120,6 +120,7 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
         continue;
     }
 
+    /* Try to exchange the latest_version into the new_version */
     if (atomsnap_compare_and_exchange(gate, latest_version, new_version, &s)) {
       if (s == ATOMSNAP_SAFE_FREE) {
         free(latest_version);
