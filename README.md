@@ -72,6 +72,7 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
 
   ATOMSNAP_STATUS s = atomsnap_release_version(current_version):
   if (s == ATOMSNAP_SAFE_FREE) {
+    free(object);
     free(current_version);
   }
 }
@@ -82,6 +83,7 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
 {
   atomsnap_version *old_version, *new_version;
   ATOMSNAP_STATUS s;
+  void *object;
 
   new_version = (struct atomsnap_version *)malloc(sizeof(atomsnap_version));
   atomsnap_set_object(new_version, new_object);
@@ -91,6 +93,8 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
    */
   old_version = atomsnap_test_and_set(gate, new_version, &s);
   if (s == ATOMSNAP_SAFE_FREE) {
+    object = atomsnap_get_object(old_version);
+    free(object);
     free(old_version);
   }
 }
@@ -101,6 +105,7 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
 {
   atomsnap_version *latest_version, *new_version;
   ATOMSNAP_STATUS s;
+  void *object;
 
   /* 
    * If the new version must be created exactly from the latest version
@@ -116,6 +121,8 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
      * because it is no longer based on the lasted version (another thread's new version)
      */
     if (s == ATOMSNAP_SAFE_FREE) {
+        object = atomsnap_get_object(latest_version);
+        free(object);
         free(latest_version);
         continue;
     }
@@ -123,6 +130,8 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
     /* Try to exchange the latest_version into the new_version */
     if (atomsnap_compare_and_exchange(gate, latest_version, new_version, &s)) {
       if (s == ATOMSNAP_SAFE_FREE) {
+        object = atomsnap_get_object(latest_version);
+        free(object);
         free(latest_version);
       }
       break;
