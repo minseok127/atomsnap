@@ -85,7 +85,8 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
   void *object;
 
   new_version = (struct atomsnap_version *)malloc(sizeof(atomsnap_version));
-  atomsnap_set_object(new_version, new_object);
+  object = malloc(sizeof(object));
+  atomsnap_set_object(new_version, object);
   
   /*
    * If unconditional version replacement is allowed
@@ -108,7 +109,7 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
    */
   for (;;) {
     latest_version = atomsnap_acquire_version(gate);
-    new_version = make_new_version(latest_version); /* user function */
+    new_version = // make your object based on the latest_version and set it into the new_version
     s = atomsnap_release_version(latest_version);
 
     /*
