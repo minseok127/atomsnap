@@ -1,6 +1,6 @@
 # ATOMSNAP
 
-This library is designed to atomically manage multiple versions of an object in a multi-threaded environment. It provides wait-free access to atomic versions and ensures the safe freeing of versions.
+This library is designed to atomically manage multiple versions of an object in a multi-threaded environment. It ensures wait-free access to versions and guarantees their safe memory release.
 
 Multiple readers obtain a pointer instantly without failure. Multiple writers can decide whether to update the pointer instantly without failure using TAS or to use CAS with a retry mechanism, depending on the requirements of the application.
 
