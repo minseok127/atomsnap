@@ -112,8 +112,8 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
 
     /*
      * If latest_version can be freed, it means that another new version has been 
-     * registered. So our new_version cannot be registered because it is no longer
-     * based on the lasted version (another thread's new version)
+     * registered by another thread. So our new_version cannot be registered 
+     * because it is no longer based on the lasted version (another thread's new version)
      */
     if (s == ATOMSNAP_SAFE_FREE) {
         free(latest_version);
