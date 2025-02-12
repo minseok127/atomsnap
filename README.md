@@ -139,7 +139,3 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *g,
   }
 }
 ```
-
-# Test
-
-# Evaluation
