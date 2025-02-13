@@ -142,3 +142,8 @@ void reader(std::barrier<> &sync) {
 	}
 }
 ```
+
+Just like obtaining global_ptr using atomic_load in std::shared_ptr, atomsnap allows acquiring the current version using atomsnap_acquire_version. This function must be used in pairs with atomsnap_release_version. The lifetime of the acquired version is guaranteed until atomsnap_release_version is called. Accessing the version after calling release is not safe and is not guaranteed to work correctly.
+
+Writers call the atomsnap_make_version function to allocate a new version. In this process, the allocation function pointer set during initialization is invoked, and the second argument of atomsnap_make_version is passed as an argument to the allocation function.
+
