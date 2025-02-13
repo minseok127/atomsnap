@@ -121,7 +121,9 @@ int main(int argc, char **argv) {
 		return -1;
 	}
 
-	struct atomsnap_version *initial_version = atomsnap_make_version(gate, 0);
+	int new_val = 0;
+	struct atomsnap_version *initial_version
+		= atomsnap_make_version(gate, (void *)(&new_val));
 	atomsnap_exchange_version(gate, initial_version);
 
 	std::barrier sync(writer_count + reader_count);

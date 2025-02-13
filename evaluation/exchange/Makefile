@@ -1,5 +1,5 @@
 CXX			:= g++
-CXXFLAGS	:= -std=c++20 -O2 -Wall -pthread
+CXXFLAGS	:= -std=c++20 -O2 -Wall -pthread -g
 
 SP_TARGET	:= shared_ptr_eval
 SP_SRCS		:= shared_ptr_eval.cpp
@@ -16,7 +16,7 @@ $(SP_TARGET): $(SP_SRCS)
 	$(CXX) $(CXXFLAGS) -o $(SP_TARGET) $(SP_SRCS)
 
 $(ATOM_TARGET): $(ATOM_SRCS)
-	$(CXX) $(CXXFLAGS) -o $(ATOM_TARGET) $(ATOM_SRCS) $(LDFLAGS) $(LDLIBS)
+	$(CXX) $(CXXFLAGS) -o $(ATOM_TARGET) $(ATOM_SRCS) $(LDFLAGS) -static $(LDLIBS)
 
 clean:
 	rm -f $(SP_TARGET) $(ATOM_TARGET)
