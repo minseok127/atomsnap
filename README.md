@@ -47,7 +47,7 @@ void reader(std::barrier<> &sync) {
 		Data *current_data = std::atomic_load(&global_ptr);
 		if (current_data->value1 != current_data->value2) {
 			fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
-					current_data->value1, current_data->value2);
+				current_data->value1, current_data->value2);
 			exit(1);
 		}
 	}
@@ -58,7 +58,27 @@ Writers create a new Data instance, modify all necessary fields, and then replac
 
 ## Implementation with atomsnap
 
-When implementing with atomsnap, just like creating a global_ptr using std::shared_ptr, an atomsnap_gate must be created. This data structure is allocated using the atomsnap_init_gate initialization function and deallocated using the atomsnap_destroy_gate function. To call this initialization function, an atomsnap_init_context data structure is required. The following is an example:
+When implementing with atomsnap, just like creating a global_ptr using std::shared_ptr, an atomsnap_gate must be created. This data structure is allocated using the atomsnap_init_gate initialization function and deallocated using the atomsnap_destroy_gate function. To call the initialization function, an atomsnap_init_context data structure is required.
+
+The user must provide two function pointers in the context. 
+
+```
+/* atomsnap.h */
+
+typedef struct atomsnap_version {
+	void *object;
+	void *free_context;
+	struct atomsnap_gate *gate;
+	void *opaque;
+} atomsnap_version;
+
+typedef struct atomsnap_init_context {
+	struct atomsnap_version *(*atomsnap_alloc_impl)(void* alloc_arg);
+	void (*atomsnap_free_impl)(struct atomsnap_version *version);
+} atomsnap_init_context;
+```
+
+The first function is responsible for allocating an atomsnap_version structure. This function is later called inside atomsnap_make_version, which is used by writers to allocate an atomsnap_version structure. The allocation function receives its argument from the parameters passed to atomsnap_make_version. The second function pointer is for deallocating an atomsnap_version. This function is automatically called when all threads referencing the atomsnap_version have disappeared. The user can specify arguments for the free function by setting them in the free_context field of atomsnap_version.
 
 ```
 struct atomsnap_version *atomsnap_alloc_impl(void *arg) {
@@ -81,9 +101,43 @@ void atomsnap_free_impl(struct atomsnap_version *version) {
 }
 
 struct atomsnap_init_context atomsnap_gate_ctx = {
-		.atomsnap_alloc_impl = atomsnap_alloc_impl,
-		.atomsnap_free_impl = atomsnap_free_impl
+	.atomsnap_alloc_impl = atomsnap_alloc_impl,
+	.atomsnap_free_impl = atomsnap_free_impl
 };
 
 atomsnap_gate *gate = atomsnap_init_gate(&atomsnap_gate_ctx);
+```
+
+Once the preparation steps are complete, the atomsnap_init_context can be passed as an argument to atomsnap_init_gate, which will return a pointer to an atomsnap_gate.
+
+```
+void writer(std::barrier<> &sync) {
+	struct atomsnap_version *new_version;
+	int values[2];
+
+	while (true) {
+		struct atomsnap_version *old_version = atomsnap_acquire_version(gate);
+		Data *old_data = static_cast<Data*>(old_version->object);
+		values[0] = old_data->value1 + 1;
+		values[1] = old_data->value2 + 1;
+		new_version = atomsnap_make_version(gate, (void*)values);
+		atomsnap_exchange_version(gate, new_version);
+		atomsnap_release_version(old_version);
+	}
+}
+
+void reader(std::barrier<> &sync) {
+	struct atomsnap_version *current_version;
+
+	while (true) {
+		current_version = atomsnap_acquire_version(gate);
+		Data *d = static_cast<Data*>(current_version->object);
+		if (d->value1 != d->value2) {
+			fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
+					d->value1, d->value2);
+			exit(1);
+		}
+		atomsnap_release_version(current_version);
+	}
+}
 ```
