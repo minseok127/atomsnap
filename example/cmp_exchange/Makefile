@@ -1,5 +1,5 @@
 CXX			:= g++
-CXXFLAGS	:= -std=c++20 -O2 -Wall -pthread -g
+CXXFLAGS	:= -std=c++20 -O2 -Wall -pthread
 
 SP_TARGET	:= shared_ptr_example
 SP_SRCS		:= shared_ptr_example.cpp
