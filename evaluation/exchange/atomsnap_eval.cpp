@@ -23,8 +23,8 @@ struct atomsnap_gate *gate = NULL;
 struct atomsnap_version *atomsnap_alloc_impl(void *arg) {
 	auto version = new atomsnap_version;
 	auto data = new Data;
-
-	data->value = (int)arg;
+	int *new_val = (int *)arg;
+	data->value = *new_val;
 	version->object = data;
 	version->free_context = NULL;
 
@@ -40,7 +40,8 @@ void writer(std::barrier<> &sync) {
 	sync.arrive_and_wait();
 	auto start = std::chrono::steady_clock::now();
 	size_t ops = 0;
-	struct atomsnap_version *old_version, *new_version;
+	struct atomsnap_version *new_version;
+	int new_val;
 
 	while (true) {
 		auto now = std::chrono::steady_clock::now();
@@ -53,7 +54,8 @@ void writer(std::barrier<> &sync) {
 
 		struct atomsnap_version *old_version = atomsnap_acquire_version(gate);
 		auto old_data = static_cast<Data*>(old_version->object);
-		new_version = atomsnap_make_version(gate, old_data->value + 1);
+		new_val = old_data->value + 1;
+		new_version = atomsnap_make_version(gate, (void*)&new_val);
 		atomsnap_release_version(old_version);
 
 		atomsnap_exchange_version(gate, new_version);
