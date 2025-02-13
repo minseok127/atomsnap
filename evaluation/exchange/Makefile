@@ -7,13 +7,16 @@ SP_SRCS		:= shared_ptr_eval.cpp
 ATOM_TARGET	:= atomsnap_eval
 ATOM_SRCS	:= atomsnap_eval.cpp
 
+LDFLAGS	+= -L../..
+LDLIBS	+= -latomsnap 
+
 all: $(SP_TARGET) $(ATOM_TARGET)
 
 $(SP_TARGET): $(SP_SRCS)
 	$(CXX) $(CXXFLAGS) -o $(SP_TARGET) $(SP_SRCS)
 
 $(ATOM_TARGET): $(ATOM_SRCS)
-	$(CXX) $(CSSFLAGS) -o $(ATOM_TARGET) $(ATOM_SRCS) -L. -latomsnap
+	$(CXX) $(CSSFLAGS) -o $(ATOM_TARGET) $(ATOM_SRCS) $(LDFLAGS) $(LDLIBS)
 
 clean:
 	rm -f $(SP_TARGET) $(ATOM_TARGET)

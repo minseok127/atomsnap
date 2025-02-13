@@ -1,13 +1,14 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
-#include <iomanip>
 #include <iostream>
+#include <memory>
 #include <thread>
 #include <vector>
 #include <barrier>
+#include <iomanip>
 
-#include "atomsnap.h"
+#include "../../atomsnap.h"
 
 std::atomic<size_t> total_writer_ops{0};
 std::atomic<size_t> total_reader_ops{0};
@@ -25,12 +26,13 @@ struct atomsnap_version *atomsnap_alloc_impl(void *arg) {
 
 	data->value = (int)arg;
 	version->object = data;
+	version->free_context = NULL;
 
 	return version;
 }
 
 void atomsnap_free_impl(struct atomsnap_version *version) {
-	delete version->data;
+	delete (Data *)version->object;
 	delete version;
 }
 
@@ -106,15 +108,19 @@ int main(int argc, char **argv) {
 		return -1;
 	}
 
-	gate = atomsnap_init_gate();
+	struct atomsnap_init_context atomsnap_gate_ctx = {
+		.atomsnap_alloc_impl = atomsnap_alloc_impl,
+		.atomsnap_free_impl = atomsnap_free_impl
+	};
+
+	gate = atomsnap_init_gate(&atomsnap_gate_ctx);
 	if (!gate) {
 		std::cerr << "Failed to init atomsnap_gate\n";
 		return -1;
 	}
 
-	struct atomsnap_version *initial_version = allocate_version(0);
-	ATOMSNAP_STATUS s;
-	atomsnap_test_and_set(gate, initial_version, &s);
+	struct atomsnap_version *initial_version = atomsnap_make_version(gate, 0);
+	atomsnap_exchange_version(gate, initial_version);
 
 	std::barrier sync(writer_count + reader_count);
 	std::vector<std::thread> threads;
