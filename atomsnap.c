@@ -41,8 +41,6 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
-#include <stdbool.h>
 #include <stdatomic.h>
 
 #include <assert.h>
@@ -62,32 +60,24 @@
 #define WRAPAROUND_MASK    (0xffffULL)
 
 /*
- * atomsnap_version - version object structure
- * @inner_refcnt: atomic inner reference counter for the version
- * @object: pointer to the actual data.
- *
- * atomsnap_version->inner_refcnt is used to determine when it is safe to free.
- */
-struct atomsnap_version {
-	_Atomic int64_t inner_refcnt;
-	void *object;
-};
-
-/*
  * atomsnap_gate - gate for atomic version read/write
- * @outer_refcnt_and_ptr: control block to manage multi-versions
+ * @control_block: control block to manage multi-versions
+ * @atomsnap_alloc_impl: user-defined memory allocation function
+ * @atomsanp_free_impl: user-defined memory free function
  *
  * Writers use atomsnap_gate to atomically register their object version.
  * Readers also use this gate to get the object and release safely.
  */
 struct atomsnap_gate {
-	_Atomic uint64_t outer_refcnt_and_ptr;
+	_Atomic uint64_t control_block;
+	struct atomsnap_version *(*atomsnap_alloc_impl)(void *alloc_arg);
+	void (*atomsnap_free_impl)(struct atomsnap_version *version);
 };
 
 /*
- * Returns pointer to a atomsnap_gate, or NULL on failure.
+ * Returns pointer to an atomsnap_gate, or NULL on failure.
  */
-struct atomsnap_gate *atomsnap_init_gate()
+struct atomsnap_gate *atomsnap_init_gate(struct atomsnap_init_context *ctx)
 {
 	atomsnap_gate *gate = calloc(1, sizeof(atomsnap_gate));
 
@@ -96,11 +86,19 @@ struct atomsnap_gate *atomsnap_init_gate()
 		return NULL;
 	}
 
+	gate->atomsnap_alloc_impl = ctx->atomsnap_alloc_impl;
+	gate->atomsnap_free_impl = ctx->atomsnap_free_impl;
+
+	if (gate->atomsnap_alloc_impl == NULL || gate->atomsnap_free_impl == NULL) {
+		free(gate);
+		return NULL;
+	}
+
 	return gate;
 }
 
 /*
- * Free the atomsnap_gate.
+ * Destroy the atomsnap_gate.
  */
 void atomsnap_destroy_gate(struct atomsnap_gate *gate)
 {
@@ -112,28 +110,32 @@ void atomsnap_destroy_gate(struct atomsnap_gate *gate)
 }
 
 /*
- * Get the actual object from the version.
+ * atomsnap_make_version - allocate memory for an atomsnap_version
+ * @gate: pointer of the atomsnap_gate
+ * @alloc_version_arg: argument of the user-defined version allocation function
+ *
+ * Allocate memory for an atomsnap_version. This function internally calls the
+ * user-defined version allocation function with @alloc_arg as an argument.
+ *
+ * Note that the version's gate and opaque are initialized, but object and
+ * free_context are not explicitly initialized within this function, as they may
+ * have been set by the user-defined function.
  */
-void *atomsnap_get_object(struct atomsnap_version *version)
+struct atomsnap_version *atomsnap_make_version(struct atomsnap_gate *gate,
+	void *alloc_arg)
 {
-	if (version == NULL) {
+	struct atomsnap_version *new_version;
+
+	if (gate == NULL) {
 		return NULL;
 	}
 
-	return version->object;
-}
+	new_version = gate->atomsnap_alloc_impl(alloc_arg);
 
-/*
- * Set the object pointer into the given version.
- */
-void atomsnap_set_object(struct atomsnap_version *version, void *obj)
-{
-	if (version == NULL) {
-		return;
-	}
-	
-	atomic_store(&version->object, obj);
-	atomic_store(&version->inner_refcnt, 0);
+	atomic_store(&new_version->gate, gate);
+	atomic_store((int64_t *)(&new_version->opaque), 0);
+
+	return new_version;
 }
 
 /*
@@ -151,7 +153,7 @@ struct atomsnap_version *atomsnap_acquire_version(struct atomsnap_gate *gate)
 		return NULL;
 	}
 
-	outer = atomic_fetch_add(&gate->outer_refcnt_and_ptr, OUTER_REF_CNT);
+	outer = atomic_fetch_add(&gate->control_block, OUTER_REF_CNT);
 
 	return (struct atomsnap_version *)GET_OUTER_PTR(outer);
 }
@@ -164,108 +166,99 @@ struct atomsnap_version *atomsnap_acquire_version(struct atomsnap_gate *gate)
  * updated inner counter was 0, it indicates that no other threads reference
  * this version and it can be safely freed.
  *
- * Return ATOMSNAP_SAFE_FREE if the version is safe to free, ATOMSNAP_UNSAFE_FREE
- * otherwise.
+ * If this version can be freed, call the user-defined version free function.
+ * Note that we do not explicitly deallocate memory for the version or its
+ * object pointer.
  */
-ATOMSNAP_STATUS atomsnap_release_version(struct atomsnap_version *version)
+void atomsnap_release_version(struct atomsnap_version *version)
 {
+	struct atomsnap_gate *gate;
 	int64_t inner_refcnt;
 
 	if (version == NULL) {
-		return ATOMSNAP_UNSAFE_FREE;
+		return;
 	}
 
-	inner_refcnt = atomic_fetch_add(&version->inner_refcnt, 1) + 1;
+	inner_refcnt = atomic_fetch_add((int64_t *)(&version->opaque), 1) + 1;
 
 	if (inner_refcnt == 0) {
-		return ATOMSNAP_SAFE_FREE;
+		gate = version->gate;
+		assert(gate != NULL);
+		assert(gate->atomsnap_free_impl != NULL);
+		gate->atomsnap_free_impl(version);
 	}
-
-	return ATOMSNAP_UNSAFE_FREE;
 }
 
 /*
- * atomsnap_test_and_set - atomically repalce the version
- * @gate: pointer to the atomsnap_gate
- * @version: new version to install
- * @old_version_status: pointer to return the old verion's status
+ * atomsnap_exchange_version - unconditonally replace the version
+ * @gate: poinetr of the atomsnap_gate
+ * @new_version: new version to be registered
  *
- * This function atomically exchanges the current version with a new one using
- * atomic_exchange. It then extracts the outer reference count and substracts
- * the old version's inner reference cuonter. The result indicates whether the
- * old version is safe to free.
- *
- * Returns the old version's pointer.
+ * If a writer wants to exchange their version into the latest version
+ * unconditonally, the writer should call this function.
  */
-struct atomsnap_version *atomsnap_test_and_set(
-	struct atomsnap_gate *gate, struct atomsnap_version *new_version,
-	ATOMSNAP_STATUS *old_version_status)
+void atomsnap_exchange_version(struct atomsnap_gate *gate,
+	struct atomsnap_version *new_version)
 {
 	uint64_t old_outer, old_outer_refcnt;
 	struct atomsnap_version *old_version;
 	int64_t inner_refcnt;
 
-	old_outer = atomic_exchange(&gate->outer_refcnt_and_ptr, 
+	assert(gate != NULL);
+	old_outer = atomic_exchange(&gate->control_block, 
 		(uint64_t)new_version);
 	old_outer_refcnt = GET_OUTER_REFCNT(old_outer);
 	old_version = (struct atomsnap_version *)GET_OUTER_PTR(old_outer);
-	*old_version_status = ATOMSNAP_UNSAFE_FREE; /* initial status */
 
 	if (old_version == NULL) {
-		return NULL;
+		return;
 	}
 
 	/* Consider wrapaound */
-	atomic_fetch_and(&old_version->inner_refcnt, WRAPAROUND_MASK);
+	atomic_fetch_and((int64_t *)(&old_version->opaque), WRAPAROUND_MASK);
 
 	/* Decrease inner ref counter, we expect the result is minus */
-	inner_refcnt = atomic_fetch_sub(&old_version->inner_refcnt,
+	inner_refcnt = atomic_fetch_sub((int64_t *)(&old_version->opaque),
 		old_outer_refcnt) - old_outer_refcnt;
 
 	/* The outer counter has been wraparouned, adjust inner count */
 	if (inner_refcnt > 0) {
-		inner_refcnt = atomic_fetch_sub(&old_version->inner_refcnt,
+		inner_refcnt = atomic_fetch_sub((int64_t *)(&old_version->opaque),
 			WRAPAROUND_FACTOR) - WRAPAROUND_FACTOR;
 	}
 	assert(inner_refcnt <= 0);
 
 	if (inner_refcnt == 0) {
-		*old_version_status = ATOMSNAP_SAFE_FREE;
+		assert(gate->atomsnap_free_impl != NULL);
+		gate->atomsnap_free_impl(old_version);
 	}
-
-	return old_version;
 }
 
 /*
- * atomsnap_compare_and_exchange - conditonally replace the version
- * @gate: pointer to the atomsnap_gate
- * @old_version: expected pointer of current version
- * @new_version: new version to install
- * @old_version_status: pointer to return the old verion's status
+ * atomsnap_compare_exchange_version - conditonally replace the version
+ * @gate: poinetr of the atomsnap_gate
+ * @old_version: old version to compare
+ * @new_version: new version to be registered
  *
- * If the current pointer matches @old_version, replace it to the @new_veresion.
- *
- * On success, it adjusts the inner reference counter of the old version based
- * on the outer reference counter, and set the free-safety status.
- *
- * Return true if the version was successfully replace; false otherwise.
+ * If a writer wants to exchange their version into the latest version
+ * only when the current latest version is @old_version, the writer should call
+ * this function.
  */
-bool atomsnap_compare_and_exchange(struct atomsnap_gate *gate,
-	struct atomsnap_version *old_version, struct atomsnap_version *new_version,
-	ATOMSNAP_STATUS *old_version_status)
+bool atomsnap_compare_exchange_version(struct atomsnap_gate *gate,
+	struct atomsnap_version *old_version, struct atomsnap_version *new_version)
 {
 	uint64_t old_outer, old_outer_refcnt;
 	int64_t inner_refcnt;
 
-	old_outer = atomic_load(&gate->outer_refcnt_and_ptr);
+	assert(gate != NULL);
+	old_outer = atomic_load(&gate->control_block);
 	old_outer_refcnt = GET_OUTER_REFCNT(old_outer);
-	*old_version_status = ATOMSNAP_UNSAFE_FREE; /* initial status */
 
 	if (old_version != (struct atomsnap_version *)GET_OUTER_PTR(old_outer)) {
 		return false;
 	}
 
-	if (!atomic_compare_exchange_weak(&gate->outer_refcnt_and_ptr,
+	if (!atomic_compare_exchange_weak(&gate->control_block,
 			&old_outer, (uint64_t)new_version)) {
 		return false;
 	}
@@ -275,21 +268,22 @@ bool atomsnap_compare_and_exchange(struct atomsnap_gate *gate,
 	}
 
 	/* Consider wrapaound */
-	atomic_fetch_and(&old_version->inner_refcnt, WRAPAROUND_MASK);
+	atomic_fetch_and((int64_t *)(&old_version->opaque), WRAPAROUND_MASK);
 
 	/* Decrease inner ref counter, we expect the result minus */
-	inner_refcnt = atomic_fetch_sub(&old_version->inner_refcnt,
+	inner_refcnt = atomic_fetch_sub((int64_t *)(&old_version->opaque),
 		old_outer_refcnt) - old_outer_refcnt;
 
 	/* The outer counter has been wraparouned, adjust inner count */
 	if (inner_refcnt > 0) {
-		inner_refcnt = atomic_fetch_sub(&old_version->inner_refcnt,
+		inner_refcnt = atomic_fetch_sub((int64_t *)(&old_version->opaque),
 			WRAPAROUND_FACTOR) - WRAPAROUND_FACTOR;
 	}
 	assert(inner_refcnt <= 0);
 
 	if (inner_refcnt == 0) {
-		*old_version_status = ATOMSNAP_SAFE_FREE;
+		assert(gate->atomsnap_free_impl != NULL);
+		gate->atomsnap_free_impl(old_version);
 	}
 
 	return true;
