@@ -1,11 +1,11 @@
 CXX			:= g++
 CXXFLAGS	:= -std=c++20 -O2 -Wall -pthread -g
 
-SP_TARGET	:= shared_ptr_eval
-SP_SRCS		:= shared_ptr_eval.cpp
+SP_TARGET	:= shared_ptr_example
+SP_SRCS		:= shared_ptr_example.cpp
 
-ATOM_TARGET	:= atomsnap_eval
-ATOM_SRCS	:= atomsnap_eval.cpp
+ATOM_TARGET	:= atomsnap_example
+ATOM_SRCS	:= atomsnap_example.cpp
 
 LDFLAGS	+= -L../..
 LDLIBS	+= -latomsnap 
