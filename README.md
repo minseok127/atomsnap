@@ -147,3 +147,4 @@ Just like obtaining global_ptr using atomic_load in std::shared_ptr, atomsnap al
 
 Writers call the atomsnap_make_version function to allocate a new version. In this process, the allocation function pointer set during initialization is invoked, and the second argument of atomsnap_make_version is passed as an argument to the allocation function.
 
+## Two options for the writer
