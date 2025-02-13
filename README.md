@@ -83,8 +83,8 @@ The first function is responsible for allocating an atomsnap_version structure. 
 Here is an example:
 ```
 struct atomsnap_version *atomsnap_alloc_impl(void *arg) {
-	auto version = new atomsnap_version;
-	auto data = new Data;
+	struct atomsnap_version *version = new atomsnap_version;
+	Data *data = new Data;
 	int *values = (int *)arg;
 
 	data->value1 = values[0];
