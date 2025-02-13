@@ -64,21 +64,24 @@ The user must provide two function pointers in the context.
 
 ```
 /* atomsnap.h */
-
+typedef struct atomsnap_init_context {
+	struct atomsnap_version *(*atomsnap_alloc_impl)(void* alloc_arg);
+	void (*atomsnap_free_impl)(struct atomsnap_version *version);
+} atomsnap_init_context;
+```
+```
+/* atomsnap.h */
 typedef struct atomsnap_version {
 	void *object;
 	void *free_context;
 	struct atomsnap_gate *gate;
 	void *opaque;
 } atomsnap_version;
-
-typedef struct atomsnap_init_context {
-	struct atomsnap_version *(*atomsnap_alloc_impl)(void* alloc_arg);
-	void (*atomsnap_free_impl)(struct atomsnap_version *version);
-} atomsnap_init_context;
 ```
 
-The first function is responsible for allocating an atomsnap_version structure. This function is later called inside atomsnap_make_version, which is used by writers to allocate an atomsnap_version structure. The allocation function receives its argument from the parameters passed to atomsnap_make_version. The second function pointer is for deallocating an atomsnap_version. This function is automatically called when all threads referencing the atomsnap_version have disappeared. The user can specify arguments for the free function by setting them in the free_context field of atomsnap_version.
+The first function is responsible for allocating an atomsnap_version structure. This function is later called inside atomsnap_make_version, which is used by writers to allocate an atomsnap_version structure. The allocation function receives its argument from the parameters passed to atomsnap_make_version. 
+
+The second function pointer is for deallocating an atomsnap_version. This function is automatically called when all threads referencing the atomsnap_version have disappeared. The user can specify arguments for the free function by setting them in the free_context field of atomsnap_version.
 
 Here is an example:
 ```
