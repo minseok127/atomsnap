@@ -61,12 +61,10 @@ void writer(std::barrier<> &sync) {
 		values[0] = old_data->value1 + 1;
 		values[1] = old_data->value2 + 1;
 		new_version = atomsnap_make_version(gate, (void*)values);
-
 		if (atomsnap_compare_exchange_version(gate,
 				old_version, new_version)) {
 			ops++;
 		}
-
 		atomsnap_release_version(old_version);
 	}
 
