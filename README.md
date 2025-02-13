@@ -173,6 +173,6 @@ void writer(std::barrier<> &sync) {
 
 This function replaces the gate’s version with new_version only if old_version is the latest version of the gate. It returns true if the replacement succeeds and false otherwise. Note that calling atomsnap_release_version on old_version before atomsnap_compare_exchange_version can lead to an ABA problem.
 
-For example, suppose Thread A obtains old_version and creates new_version based on it. Before calling atomsnap_compare_exchange_version, it calls atomsnap_release_version, freeing old_version. Meanwhile, Thread B creates a new_version, its memory address matches that of the now-freed old_version. If Thread B successfully replaces the version in gate, and Thread A then calls atomsnap_compare_exchange_version, Thread A would replace the version based on an invalid version.
+For example, suppose Thread A obtains old_version and creates new_version based on it. Before calling atomsnap_compare_exchange_version, it calls atomsnap_release_version, freeing old_version. Meanwhile, Thread B creates a new_version, its memory address matches that of the now-freed old_version. If Thread B successfully replaces the version in gate, and Thread A then calls atomsnap_compare_exchange_version, Thread A would replace the version based on an invalid version (what we expect is for atomsnap_compare_exchange_version to fail since the replacement should be based on Thread B’s version).
 
 To prevent this, the order of atomsnap_compare_exchange_version and atomsnap_release_version must be carefully managed.
