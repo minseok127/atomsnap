@@ -148,3 +148,31 @@ Just like obtaining global_ptr using atomic_load in std::shared_ptr, atomsnap al
 Writers call the atomsnap_make_version function to allocate a new version. In this process, the allocation function pointer set during initialization is invoked, and the second argument of atomsnap_make_version is passed as an argument to the allocation function.
 
 ## Two options for the writer
+
+If the writer creates a new version regardless of the previous state, it can replace the version using the atomsnap_exchange_version function, as shown in the pseudocode above. On the other hand, if the writer is sensitive to the previous version's state, it may need to use atomsnap_compare_exchange_version to replace the version, as shown in the following pseudocode.
+
+```
+void writer(std::barrier<> &sync) {
+	struct atomsnap_version *new_version;
+	int values[2];
+
+	while (true) {
+		struct atomsnap_version *old_version = atomsnap_acquire_version(gate);
+		auto old_data = static_cast<Data*>(old_version->object);
+		values[0] = old_data->value1 + 1;
+		values[1] = old_data->value2 + 1;
+		new_version = atomsnap_make_version(gate, (void*)values);
+		if (atomsnap_compare_exchange_version(gate,
+				old_version, new_version)) {
+			// do something
+		}
+		atomsnap_release_version(old_version); /* !!! Call this function after atomsnap_compare_exchange_version !!! */
+	}
+}
+```
+
+This function replaces the gate’s version with new_version only if old_version is the latest version of the gate. It returns true if the replacement succeeds and false otherwise. Note that calling atomsnap_release_version on old_version before atomsnap_compare_exchange_version can lead to an ABA problem.
+
+For example, suppose Thread A obtains old_version and creates new_version based on it. Before calling atomsnap_compare_exchange_version, it calls atomsnap_release_version, freeing old_version. Meanwhile, Thread B creates a new_version, its memory address matches that of the now-freed old_version. If Thread B successfully replaces the version in gate, and Thread A then calls atomsnap_compare_exchange_version, Thread A would replace the version based on an invalid version.
+
+To prevent this, the order of atomsnap_compare_exchange_version and atomsnap_release_version must be carefully managed.
