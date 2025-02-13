@@ -80,6 +80,7 @@ typedef struct atomsnap_init_context {
 
 The first function is responsible for allocating an atomsnap_version structure. This function is later called inside atomsnap_make_version, which is used by writers to allocate an atomsnap_version structure. The allocation function receives its argument from the parameters passed to atomsnap_make_version. The second function pointer is for deallocating an atomsnap_version. This function is automatically called when all threads referencing the atomsnap_version have disappeared. The user can specify arguments for the free function by setting them in the free_context field of atomsnap_version.
 
+Here is an example:
 ```
 struct atomsnap_version *atomsnap_alloc_impl(void *arg) {
 	auto version = new atomsnap_version;
