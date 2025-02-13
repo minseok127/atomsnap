@@ -15,7 +15,8 @@ std::atomic<size_t> total_reader_ops{0};
 int duration_seconds = 0;
 
 struct Data {
-	int value;
+	int64_t value1;
+	int64_t value2;
 };
 
 struct atomsnap_gate *gate = NULL;
@@ -23,8 +24,11 @@ struct atomsnap_gate *gate = NULL;
 struct atomsnap_version *atomsnap_alloc_impl(void *arg) {
 	auto version = new atomsnap_version;
 	auto data = new Data;
-	int *new_val = (int *)arg;
-	data->value = *new_val;
+	int *values = (int *)arg;
+
+	data->value1 = values[0];
+	data->value2 = values[1];
+
 	version->object = data;
 	version->free_context = NULL;
 
@@ -41,7 +45,7 @@ void writer(std::barrier<> &sync) {
 	auto start = std::chrono::steady_clock::now();
 	size_t ops = 0;
 	struct atomsnap_version *new_version;
-	int new_val;
+	int values[2];
 
 	while (true) {
 		auto now = std::chrono::steady_clock::now();
@@ -54,8 +58,9 @@ void writer(std::barrier<> &sync) {
 
 		struct atomsnap_version *old_version = atomsnap_acquire_version(gate);
 		auto old_data = static_cast<Data*>(old_version->object);
-		new_val = old_data->value + 1;
-		new_version = atomsnap_make_version(gate, (void*)&new_val);
+		values[0] = old_data->value1 + 1;
+		values[1] = old_data->value2 + 1;
+		new_version = atomsnap_make_version(gate, (void*)values);
 		atomsnap_release_version(old_version);
 
 		atomsnap_exchange_version(gate, new_version);
@@ -82,8 +87,11 @@ void reader(std::barrier<> &sync) {
 
 		current_version = atomsnap_acquire_version(gate);
 		Data *d = static_cast<Data*>(current_version->object);
-		volatile int tmp = d->value;
-		(void)tmp;
+		if (d->value1 != d->value2) {
+			fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
+					d->value1, d->value2);
+			exit(1);
+		}
 		atomsnap_release_version(current_version);
 
 		ops++;
@@ -121,9 +129,9 @@ int main(int argc, char **argv) {
 		return -1;
 	}
 
-	int new_val = 0;
+	int values[2] = { 0, 0 };
 	struct atomsnap_version *initial_version
-		= atomsnap_make_version(gate, (void *)(&new_val));
+		= atomsnap_make_version(gate, (void *)values);
 	atomsnap_exchange_version(gate, initial_version);
 
 	std::barrier sync(writer_count + reader_count);

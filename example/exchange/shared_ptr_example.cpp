@@ -13,7 +13,8 @@ std::atomic<size_t> total_reader_ops{0};
 int duration_seconds = 0;
 
 struct Data {
-	int value;
+	int64_t value1;
+	int64_t value2;
 };
 
 std::shared_ptr<Data> global_ptr = std::make_shared<Data>();
@@ -34,8 +35,8 @@ void writer(std::barrier<> &sync) {
 
 		auto old_data = std::atomic_load(&global_ptr);
 		auto new_data = std::make_shared<Data>(*old_data);
-		new_data->value = old_data->value + 1;
-
+		new_data->value1 = old_data->value1 + 1;
+		new_data->value2 = old_data->value2 + 1;
 		std::atomic_store(&global_ptr, new_data);
 		ops++;
 	}
@@ -58,8 +59,11 @@ void reader(std::barrier<> &sync) {
 		}
 
 		auto current_data = std::atomic_load(&global_ptr);
-		volatile int tmp = current_data->value;
-		(void)tmp;
+		if (current_data->value1 != current_data->value2) {
+			fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
+					current_data->value1, current_data->value2);
+			exit(1);
+		}
 		ops++;
 	}
 

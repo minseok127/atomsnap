@@ -13,7 +13,8 @@ std::atomic<size_t> total_reader_ops{0};
 int duration_seconds = 0;
 
 struct Data {
-	int value;
+	int64_t value1;
+	int64_t value2;
 };
 
 std::shared_ptr<Data> global_ptr = std::make_shared<Data>();
@@ -34,7 +35,8 @@ void writer(std::barrier<> &sync) {
 
 		auto old_data = std::atomic_load(&global_ptr);
 		auto new_data = std::make_shared<Data>(*old_data);
-		new_data->value = old_data->value + 1;
+		new_data->value1 = old_data->value1 + 1;
+		new_data->value2 = old_data->value2 + 1;
 
 		if (std::atomic_compare_exchange_strong(&global_ptr,
 				&old_data, new_data)) {
@@ -49,6 +51,7 @@ void reader(std::barrier<> &sync) {
 	sync.arrive_and_wait();
 	auto start = std::chrono::steady_clock::now();
 	size_t ops = 0;
+	int64_t prev_value = 0;
 
 	while (true) {
 		auto now = std::chrono::steady_clock::now();
@@ -60,8 +63,18 @@ void reader(std::barrier<> &sync) {
 		}
 
 		auto current_data = std::atomic_load(&global_ptr);
-		volatile int tmp = current_data->value;
-		(void)tmp;
+		if (current_data->value1 != current_data->value2) {
+			fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
+					current_data->value1, current_data->value2);
+			exit(1);
+		}
+		if (current_data->value1 < prev_value) {
+			fprintf(stderr, "Invalid value, prev: %ld, now: %ld\n",
+					prev_value, current_data->value1);
+			exit(1);
+		}
+		prev_value = current_data->value1;
+
 		ops++;
 	}
 
