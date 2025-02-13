@@ -16,7 +16,7 @@ $ make
 => libatomsnap.a, libatomsnap.so, atomsnap.h
 ```
 
-# Usage
+# Example
 
 The target situation involves multiple writers attempting to modify a logically identical object. The object is too large to be modified with a single atomic instruction, so writers copy it into their own memory, make all necessary modifications, and then attempt to replace the object with the updated version. Readers, on the other hand, should only see objects that are either entirely unmodified or fully updated, ensuring atomic visibility without partial modifications.
 
