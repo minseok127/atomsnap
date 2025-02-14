@@ -106,7 +106,7 @@ Data *global_ptr = new Data{0, 0};
 std::shared_mutex rwlock;
 ```
 
-This situation can be implemented using C++'s std::shared_mutex. For example, consider a Data structure that contains two 8-byte integers. Writers need to update both value1 and value2, while readers must always see a fully updated or completely unchanged version of Data. To achieve this, we can declare a global std::shared_mutex and use it to manage versions atomically.
+This situation can be implemented using C++'s std::shared_mutex. For example, consider a Data structure that contains two 8-byte integers. Writers need to update both value1 and value2, while readers must always see a fully updated or completely unchanged version of Data. To achieve this, we can declare a global std::shared_mutex and use it to manage Data atomically.
 
 ```
 void writer(std::barrier<> &sync) {
