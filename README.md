@@ -198,6 +198,6 @@ This function replaces the gate’s version with new_version only if old_version
 
 For example, suppose Thread A obtains old_version and creates new_version based on it. Before calling atomsnap_compare_exchange_version, it calls atomsnap_release_version, freeing old_version. Meanwhile, Thread B creates a new_version, its memory address accidentally matches that of the now-freed old_version. If Thread B successfully replaces the version in the gate, and Thread A then calls atomsnap_compare_exchange_version, Thread A would replace the version based on an invalid version (what we expect is for atomsnap_compare_exchange_version to fail since the replacement should be based on Thread B’s version).
 
-To prevent this, the order of atomsnap_compare_exchange_version and atomsnap_release_version must be carefully managed.
+To prevent this, atomsnap_release_version for the old_version used in atomsnap_compare_exchange_version must be called only after atomsnap_compare_exchange_version has completed.
 
 # Evaluation (std::shared_ptr vs atomsnap)
