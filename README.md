@@ -94,6 +94,10 @@ typedef struct atomsnap_version {
 	void *opaque;
 } atomsnap_version;
 ```
+```
+struct atomsnap_version *atomsnap_make_version(struct atomsnap_gate *gate,
+	void *alloc_arg);
+```
 
 The first function is responsible for allocating an atomsnap_version structure. This function is later called inside atomsnap_make_version, which is used by writers to allocate an atomsnap_version structure. The allocation function receives its argument from the parameters passed to atomsnap_make_version. 
 
