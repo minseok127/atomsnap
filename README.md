@@ -1,12 +1,27 @@
 # ATOMSNAP
 
-This library is designed to atomically manage multiple versions of an object in a multi-threaded environment. It ensures wait-free access to versions and guarantees their safe memory release.
+### Purpose:
 
-Multiple readers obtain a pointer instantly without failure. Multiple writers can decide whether to update the pointer using TAS without failure, or to use CAS with a retry mechanism, depending on the requirements of the application.
+- Atomically manages multiple versions of an object in a multi-threaded environment.
+- Ensures wait-free access and safe memory release.
 
-Acquiring and releasing a version should always be done as a pair. Avoid acquiring repeatedly without releasing. If the gap between acquisitions and releases for the same version exceeds the range of uint16_t (0xffff), the behavior becomes unpredictable. However, as long as this gap does not widen, there are no restrictions on accessing the same version. 
+### Reader & Writer Behavior:
 
-Note that this library is implemented under the assumption that user virtual memory address is limited to 48 bits. Using virtual memory beyond this range requires additional implementation.
+- Readers: Instantly obtain a pointer without failure
+- Writers:
+	- Use TAS (Test-And-Set) for guaranteed updates.
+	- Use CAS (Compare-And-Swap) with a retry mechanism if needed.
+
+### Version Management Rules:
+
+- Acquiring and releasing a version must always be paired.
+- Avoid repeated acquisition without release.
+- If the acquisition-release gap exceeds 0xFFFF (uint16_t), behavior is unpredictable.
+
+### Memory Assumption:
+
+- Assumes user virtual memory is limited to 48 bits.
+- Using memory beyond this range requires additional implementation.
 
 # Build
 ```
@@ -56,7 +71,7 @@ void reader(std::barrier<> &sync) {
 ```
 Writers create a new Data instance, modify all necessary fields, and then replace the old version with the new one in an atomic operation. Readers always access a fully consistent snapshot of Data, ensuring they never observe partially modified values. Since both readers and writers use std::shared_ptr, safe memory deallocation of Data is guaranteed.
 
-## Implementation with atomsnap
+## Implementation with atomsnap (instead of std::shared_ptr)
 
 When implementing with atomsnap, just like creating a global_ptr using std::shared_ptr, an atomsnap_gate must be created. This data structure is allocated using the atomsnap_init_gate initialization function and deallocated using the atomsnap_destroy_gate function. To call the initialization function, an atomsnap_init_context data structure is required.
 
