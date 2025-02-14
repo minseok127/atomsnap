@@ -205,9 +205,9 @@ void atomsnap_exchange_version(struct atomsnap_gate *gate,
 	int64_t inner_refcnt;
 
 	assert(gate != NULL);
+
 	old_outer = atomic_exchange(&gate->control_block, 
 		(uint64_t)new_version);
-	old_outer_refcnt = GET_OUTER_REFCNT(old_outer);
 	old_version = (struct atomsnap_version *)GET_OUTER_PTR(old_outer);
 
 	if (old_version == NULL) {
@@ -218,6 +218,7 @@ void atomsnap_exchange_version(struct atomsnap_gate *gate,
 	atomic_fetch_and((int64_t *)(&old_version->opaque), WRAPAROUND_MASK);
 
 	/* Decrease inner ref counter, we expect the result is minus */
+	old_outer_refcnt = GET_OUTER_REFCNT(old_outer);
 	inner_refcnt = atomic_fetch_sub((int64_t *)(&old_version->opaque),
 		old_outer_refcnt) - old_outer_refcnt;
 
@@ -251,8 +252,8 @@ bool atomsnap_compare_exchange_version(struct atomsnap_gate *gate,
 	int64_t inner_refcnt;
 
 	assert(gate != NULL);
+
 	old_outer = atomic_load(&gate->control_block);
-	old_outer_refcnt = GET_OUTER_REFCNT(old_outer);
 
 	if (old_version != (struct atomsnap_version *)GET_OUTER_PTR(old_outer)) {
 		return false;
@@ -271,6 +272,7 @@ bool atomsnap_compare_exchange_version(struct atomsnap_gate *gate,
 	atomic_fetch_and((int64_t *)(&old_version->opaque), WRAPAROUND_MASK);
 
 	/* Decrease inner ref counter, we expect the result minus */
+	old_outer_refcnt = GET_OUTER_REFCNT(old_outer);
 	inner_refcnt = atomic_fetch_sub((int64_t *)(&old_version->opaque),
 		old_outer_refcnt) - old_outer_refcnt;
 
