@@ -3,7 +3,8 @@
 ### Purpose:
 
 - Atomically manages multiple versions of an object in a multi-threaded environment.
-	- Readers should only see the object that is either entirely unmodified or fully updated.
+	- Readers should only see the object that is either entirely unmodified or fully updated. 
+	- So writers do not modify the object in place. Instead, they copy it, update the data, and then register a new version.
 - Ensures wait-free access and safe memory release.
 
 ### Reader & Writer Behavior:
