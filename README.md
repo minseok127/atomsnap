@@ -173,7 +173,7 @@ void reader(std::barrier<> &sync) {
 }
 
 ```
-Writers create a new Data instance, modify all necessary fields, and then replace the old version with the new one in an atomic operation. Readers always access a fully consistent snapshot of Data, ensuring they never observe partially modified values. Since both readers and writers use std::shared_ptr, safe memory deallocation of Data is guaranteed.
+Writers create a new Data instance, modify all necessary fields, and then replace the old version with the new one. Readers always access a fully consistent snapshot of Data, ensuring they never observe partially modified values. Since both readers and writers use std::shared_ptr, safe memory deallocation of Data is guaranteed.
 
 ## with atomsnap
 
