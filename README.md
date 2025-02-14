@@ -87,7 +87,53 @@ $ make
 
 The target situation involves multiple writers attempting to modify a logically identical object. The object is too large to be modified with a single atomic instruction, so writers copy it into their own memory, make all necessary modifications, and then attempt to replace the object with the updated version. Readers, on the other hand, should only see objects that are either entirely unmodified or fully updated, ensuring atomic visibility without partial modifications.
 
-## Implementation with std::shared_ptr
+## with std::shared_mutex
+
+```
+struct Data {
+	int64_t value1;
+	int64_t value2;
+};
+
+Data *global_ptr = new Data{0, 0};
+
+std::shared_mutex rwlock;
+```
+
+This situation can be implemented using C++'s std::shared_mutex. For example, consider a Data structure that contains two 8-byte integers. Writers need to update both value1 and value2, while readers must always see a fully updated or completely unchanged version of Data. To achieve this, we can declare a global std::shared_mutex and use it to manage versions atomically.
+
+```
+void writer(std::barrier<> &sync) {
+	while (true) {
+		{
+			std::unique_lock<std::shared_mutex> lock(rwlock);
+			global_ptr->value1 = global_ptr->value1 + 1;
+			global_ptr->value2 = global_ptr->value2 + 1;
+		}
+	}
+}
+
+void reader(std::barrier<> &sync) {
+	while (true) {
+		int64_t v1, v2;
+		{
+			std::shared_lock<std::shared_mutex> lock(rwlock);
+			v1 = global_ptr->value1;
+			v2 = global_ptr->value2;
+		}
+
+		if (v1 != v2) {
+			fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
+					v1, v2);
+			exit(1);
+		}
+	}
+}
+```
+
+Writers acquire a unique_lock on the shared_mutex to modify the value, while readers acquire a shared_lock to read it. Since they operate on the same object pointer, there is no need for additional memory management for object deallocation.
+
+## with std::shared_ptr
 ```
 struct Data {
 	int64_t value1;
@@ -96,7 +142,7 @@ struct Data {
 
 std::shared_ptr<Data> global_ptr = std::make_shared<Data>();
 ```
-This situation can be implemented using C++'s std::shared_ptr. For example, consider a Data structure that contains two 8-byte integers. Writers need to update both value1 and value2, while readers must always see a fully updated or completely unchanged version of Data. To achieve this, we can declare a global std::shared_ptr<Data> and use it to manage versions atomically.
+This situation can also be implemented using C++'s std::shared_ptr. At this time, global_ptr is declared as a shared_ptr instead of a direct pointer to the Data.
 
 ```
 void writer(std::barrier<> &sync) {
@@ -123,7 +169,7 @@ void reader(std::barrier<> &sync) {
 ```
 Writers create a new Data instance, modify all necessary fields, and then replace the old version with the new one in an atomic operation. Readers always access a fully consistent snapshot of Data, ensuring they never observe partially modified values. Since both readers and writers use std::shared_ptr, safe memory deallocation of Data is guaranteed.
 
-## Implementation with atomsnap (instead of std::shared_ptr)
+## with atomsnap
 
 When implementing with atomsnap, just like creating a global_ptr using std::shared_ptr, an atomsnap_gate must be created. This data structure is allocated using the atomsnap_init_gate() initialization function and deallocated using the atomsnap_destroy_gate() function. To call the initialization function, an atomsnap_init_context data structure is required.
 
