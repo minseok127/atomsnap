@@ -71,7 +71,7 @@ $ make
 		- Ensures the version is not deallocated until released.
 	- atomsnap_release_version(version)
 		- Pairs with atomsnap_acquire_version()
-		- Releases a version and invoking the user-defined free function when no threads reference it.
+		- Releases a version and invokes the user-defined free function when no threads reference it.
 
 - Writer Operations
 	- atomsnap_make_version(gate, alloc_arg)
