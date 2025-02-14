@@ -14,9 +14,6 @@
 		- Destroys an atomsnap_gate.
 
 - Version Management
-	- atomsnap_make_version(gate, alloc_arg)
-		- Allocates memory for an atomsnap_version. 
-		- Calls a user-defined allocation function with alloc_arg.
 	- atomsnap_acquire_version(gate)
 		- Atomically acquires the current version.
 		- Ensures the version is not deallocated until released.
@@ -25,6 +22,9 @@
 		- Releases a version and invoking the user-defined free function when no threads reference it.
 
 - Writer Operations
+	- atomsnap_make_version(gate, alloc_arg)
+		- Allocates memory for an atomsnap_version. 
+		- Calls a user-defined allocation function with alloc_arg.
 	- atomsnap_exchange_version(gate, version)
 		- Unconditionally replaces the gate’s version with the given version.
 	- atomsnap_compare_exchange_version(gate, old_version, new_version) 
