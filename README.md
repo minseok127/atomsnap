@@ -32,7 +32,7 @@ $ make
 => libatomsnap.a, libatomsnap.so, atomsnap.h
 ```
 
-# Data Structure:
+# Data Structure
 
 - struct atomsnap_gate
 	- Synchronization point that manages versioned object in a multi-threaded environment.
@@ -57,7 +57,7 @@ $ make
 		- After creation, writers assign their object to object and set free_context for cleanup.
 		- gate and opaque are initialized internally and should not be modified.
 
-# API:
+# API
 
 - Gate Management
 	- atomsnap_init_gate(ctx)
