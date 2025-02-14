@@ -54,7 +54,7 @@ $ make
 		- opaque → Internal version management data, not user-modifiable.
 	- Usage:
 		- Writers create a version using atomsnap_make_version().
-		- After creation, writers assign their object to object and set free_context for cleanup.
+		- After creation, writers assign their object and set free_context for cleanup.
 		- gate and opaque are initialized internally and should not be modified.
 
 # API
