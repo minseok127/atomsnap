@@ -251,4 +251,4 @@ For example, suppose Thread A obtains old_version and creates new_version based 
 
 To prevent this, atomsnap_release_version() for the old_version used in atomsnap_compare_exchange_version() must be called only after atomsnap_compare_exchange_version() has completed.
 
-# Evaluation (std::shared_ptr vs atomsnap)
+# Evaluation
