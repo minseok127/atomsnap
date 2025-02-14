@@ -2,10 +2,14 @@
 
 ### Purpose:
 
-- Atomically manages multiple versions of an object in a multi-threaded environment.
+- Multi-Version Management in a Multi-Threaded Environment
+	- Atomically manages multiple versions of an object.
 	- Readers should only see the object that is either entirely unmodified or fully updated. 
-	- So writers do not modify the object in place. Instead, they copy it, update the data, and then register a new version.
-- Ensures wait-free access and safe memory release.
+	- So writers do not modify the object in place; instead, they copy it, update the data, and then register a new version.
+
+- Performance and Safety
+	- Ensures wait-free access.
+	- Guarantees safe memory release.
 
 ### Reader & Writer Behavior:
 
