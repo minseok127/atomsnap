@@ -1,32 +1,32 @@
 # ATOMSNAP
 
-### Purpose:
+### Purpose
 
-- Multi-Version Management in a Multi-Threaded Environment:
+- Multi-Version Management in a Multi-Threaded Environment.
 	- Atomically manages multiple versions of an object.
 	- Readers should only see the object that is either entirely unmodified or fully updated. 
 	- Writers do not modify the object in place; instead, they copy it, update the data, and change the object pointer into the new version.
 
-- Performance and Safety:
+- Performance and Safety.
 	- Ensures wait-free access.
 	- Guarantees safe version memory release.
 
-### Reader & Writer Behavior:
+### Reader & Writer Behavior
 
-- Readers: 
+- Readers
 	- Instantly obtain a pointer without failure
 
-- Writers:
+- Writers
 	- Use TAS (Test-And-Set) for guaranteed updates.
 	- Use CAS (Compare-And-Swap) with a retry mechanism if needed.
 
-### Version Management Rules:
+### Version Management Rules
 
 - Acquiring and releasing a version must always be paired.
 - Avoid repeated acquisition without release.
 - If the acquisition-release gap exceeds 0xFFFF (uint16_t), behavior is unpredictable.
 
-### Memory Assumption:
+### Memory Assumption
 
 - Assumes user virtual memory is limited to 48 bits.
 - Using memory beyond this range requires additional implementation.
