@@ -348,7 +348,7 @@ $ make
 |	4 / 4 	  | 	       27,958 |       1,419,709 | 7,147,858 |
 |	8 / 8 	  | 	        8,882 |       1,122,508 | 7,605,056 |
 
-### Stateful version changing
+### Stateful version changing (competition among writers)
 
 ```
 $ git clone https://github.com/minseok127/atomsnap.git
