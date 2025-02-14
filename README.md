@@ -332,7 +332,7 @@ $ make
 
 - Reader throughput (ops/sec)
 
-| Reader / Wrtier | std::shared_ptr | atomsnap |
+| # of Readers / Writers | std::shared_ptr | atomsnap |
 |:---------------:|:---------------:|:--------:|
 |	1 / 1 	  | 4,118,869    | 15,364,317 |
 |	2 / 2 	  |  3,919,675    | 12,911,508 |
@@ -342,7 +342,7 @@ $ make
 
 - Writer throughput (ops/sec)
 
-| Reader / Wrtier | std::shared_ptr | atomsnap |
+| # of Readers / Writers | std::shared_ptr | atomsnap |
 |:---------------:|:---------------:|:--------:|
 |	1 / 1 	  |  2,290,178 | 6,536,867 |
 |	2 / 2 	  | 	 1,874,746 | 5,934,981 |
@@ -362,7 +362,7 @@ $ make
 
 - Reader throughput (ops/sec)
 
-| Reader / Wrtier | std::shared_mutex | std::shared_ptr | atomsnap |
+| # of Readers / Writers | std::shared_mutex | std::shared_ptr | atomsnap |
 |:---------------:|:-----------------:|:---------------:|:--------:|
 |	1 / 1 	  | 	   483,073    |    4,168,734    | 13,345,141 |
 |	2 / 2 	  |     10,806,981    |    3,790,341    | 14,037,157 |
@@ -372,7 +372,7 @@ $ make
 
 - Writer throughput (ops/sec)
 
-| Reader / Wrtier | std::shared_mutex | std::shared_ptr | atomsnap |
+| # of Readers / Writers | std::shared_mutex | std::shared_ptr | atomsnap |
 |:---------------:|:-----------------:|:---------------:|:--------:|
 |	1 / 1 	  | 	      395,415 |     2,152,445   | 6,104,996 |
 |	2 / 2 	  | 	      150,856 |     1,444,993   | 3,325,338 |
