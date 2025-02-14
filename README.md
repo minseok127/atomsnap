@@ -29,7 +29,13 @@
 $ git clone https://github.com/minseok127/atomsnap.git
 $ cd atomsnap
 $ make
-=> libatomsnap.a, libatomsnap.so, atomsnap.h
+$ tree
+|
+-- libatomsnap.a 
+|
+-- libatomsnap.so
+|
+-- atomsnap.h
 ```
 
 # Data Structure
