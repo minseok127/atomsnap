@@ -5,33 +5,6 @@
 - Atomically manages multiple versions of an object in a multi-threaded environment.
 - Ensures wait-free access and safe memory release.
 
-### API overview:
-
-- Gate Management
-	- atomsnap_init_gate(ctx)
-		- Initializes and returns a pointer to an atomsnap_gate, or NULL on failure.
-	- atomsnap_destroy_gate(gate)
-		- Destroys an atomsnap_gate.
-
-- Version Management
-	- atomsnap_acquire_version(gate)
-		- Atomically acquires the current version.
-		- Ensures the version is not deallocated until released.
-	- atomsnap_release_version(version)
-		- Pairs with atomsnap_acquire_version()
-		- Releases a version and invoking the user-defined free function when no threads reference it.
-
-- Writer Operations
-	- atomsnap_make_version(gate, alloc_arg)
-		- Allocates memory for an atomsnap_version. 
-		- Calls a user-defined allocation function with alloc_arg.
-	- atomsnap_exchange_version(gate, version)
-		- Unconditionally replaces the gate’s version with the given version.
-	- atomsnap_compare_exchange_version(gate, old_version, new_version) 
-		- Replaces the gate’s version only if the latest version matches old_version.
-		- Returns true on success.
-
-
 ### Reader & Writer Behavior:
 
 - Readers: 
@@ -58,6 +31,32 @@ $ cd atomsnap
 $ make
 => libatomsnap.a, libatomsnap.so, atomsnap.h
 ```
+
+# API overview:
+
+- Gate Management
+	- atomsnap_init_gate(ctx)
+		- Initializes and returns a pointer to an atomsnap_gate, or NULL on failure.
+	- atomsnap_destroy_gate(gate)
+		- Destroys an atomsnap_gate.
+
+- Version Management
+	- atomsnap_acquire_version(gate)
+		- Atomically acquires the current version.
+		- Ensures the version is not deallocated until released.
+	- atomsnap_release_version(version)
+		- Pairs with atomsnap_acquire_version()
+		- Releases a version and invoking the user-defined free function when no threads reference it.
+
+- Writer Operations
+	- atomsnap_make_version(gate, alloc_arg)
+		- Allocates memory for an atomsnap_version. 
+		- Calls a user-defined allocation function with alloc_arg.
+	- atomsnap_exchange_version(gate, version)
+		- Unconditionally replaces the gate’s version with the given version.
+	- atomsnap_compare_exchange_version(gate, old_version, new_version) 
+		- Replaces the gate’s version only if the latest version matches old_version.
+		- Returns true on success.
 
 # Example
 
