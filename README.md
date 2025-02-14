@@ -42,8 +42,8 @@ $ make
 	- Passed as an argument to atomsnap_init_gate().
 	- Contains user-defined function pointers for managing memory allocation and deallocation of atomsnap_version objects.
 	- Fields:
-		- atomsnap_alloc_impl → Custom memory allocation function.
-		- atomsnap_free_impl → Custom memory deallocation function.
+		- atomsnap_alloc_impl → Custom memory allocation function pointer.
+		- atomsnap_free_impl → Custom memory deallocation function pointer.
 
 - struct atomsnap_version (Versioned Object)
 	- Represents a specific version of an object.
