@@ -91,8 +91,8 @@ The target situation involves multiple writers attempting to modify a logically 
 
 ```
 struct Data {
-	int64_t value1;
-	int64_t value2;
+    int64_t value1;
+    int64_t value2;
 };
 
 Data *global_ptr = new Data{0, 0};
@@ -104,30 +104,30 @@ This situation can be implemented using C++'s std::shared_mutex. For example, co
 
 ```
 void writer(std::barrier<> &sync) {
-	while (true) {
-		{
-			std::unique_lock<std::shared_mutex> lock(rwlock);
-			global_ptr->value1 = global_ptr->value1 + 1;
-			global_ptr->value2 = global_ptr->value2 + 1;
-		}
-	}
+    while (true) {
+        {
+            std::unique_lock<std::shared_mutex> lock(rwlock);
+            global_ptr->value1 = global_ptr->value1 + 1;
+            global_ptr->value2 = global_ptr->value2 + 1;
+        }
+    }
 }
 
 void reader(std::barrier<> &sync) {
-	while (true) {
-		int64_t v1, v2;
-		{
-			std::shared_lock<std::shared_mutex> lock(rwlock);
-			v1 = global_ptr->value1;
-			v2 = global_ptr->value2;
-		}
+    while (true) {
+        int64_t v1, v2;
+        {
+            std::shared_lock<std::shared_mutex> lock(rwlock);
+            v1 = global_ptr->value1;
+            v2 = global_ptr->value2;
+        }
 
-		if (v1 != v2) {
-			fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
-					v1, v2);
-			exit(1);
-		}
-	}
+        if (v1 != v2) {
+            fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
+                v1, v2);
+            exit(1);
+        }
+    }
 }
 ```
 
@@ -136,8 +136,8 @@ Writers acquire a unique_lock on the shared_mutex to modify the value, while rea
 ## with std::shared_ptr
 ```
 struct Data {
-	int64_t value1;
-	int64_t value2;
+    int64_t value1;
+    int64_t value2;
 };
 
 std::shared_ptr<Data> global_ptr = std::make_shared<Data>();
@@ -146,24 +146,24 @@ This situation can also be implemented using C++'s std::shared_ptr. At this time
 
 ```
 void writer(std::barrier<> &sync) {
-	while (true) {
-		Data *old_data = std::atomic_load(&global_ptr);
-		Data *new_data = std::make_shared<Data>(*old_data);
-		new_data->value1 = old_data->value1 + 1;
-		new_data->value2 = old_data->value2 + 1;
-		std::atomic_store(&global_ptr, new_data);
-	}
+    while (true) {
+        Data *old_data = std::atomic_load(&global_ptr);
+        Data *new_data = std::make_shared<Data>(*old_data);
+        new_data->value1 = old_data->value1 + 1;
+        new_data->value2 = old_data->value2 + 1;
+        std::atomic_store(&global_ptr, new_data);
+    }
 }
 
 void reader(std::barrier<> &sync) {
 	while (true) {
-		Data *current_data = std::atomic_load(&global_ptr);
-		if (current_data->value1 != current_data->value2) {
-			fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
-				current_data->value1, current_data->value2);
-			exit(1);
-		}
-	}
+        Data *current_data = std::atomic_load(&global_ptr);
+        if (current_data->value1 != current_data->value2) {
+            fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
+                current_data->value1, current_data->value2);
+            exit(1);
+        }
+    }
 }
 
 ```
@@ -178,22 +178,22 @@ The user must provide two function pointers in the context.
 ```
 /* atomsnap.h */
 typedef struct atomsnap_init_context {
-	struct atomsnap_version *(*atomsnap_alloc_impl)(void* alloc_arg);
-	void (*atomsnap_free_impl)(struct atomsnap_version *version);
+    struct atomsnap_version *(*atomsnap_alloc_impl)(void* alloc_arg);
+    void (*atomsnap_free_impl)(struct atomsnap_version *version);
 } atomsnap_init_context;
 ```
 ```
 /* atomsnap.h */
 typedef struct atomsnap_version {
-	void *object;
-	void *free_context;
-	struct atomsnap_gate *gate;
-	void *opaque;
+    void *object;
+    void *free_context;
+    struct atomsnap_gate *gate;
+    void *opaque;
 } atomsnap_version;
 ```
 ```
 struct atomsnap_version *atomsnap_make_version(struct atomsnap_gate *gate,
-	void *alloc_arg);
+    void *alloc_arg);
 ```
 
 The first function is responsible for allocating an atomsnap_version structure. This function is later called inside atomsnap_make_version(), which is used by writers to allocate an atomsnap_version structure. The allocation function receives its argument from the parameters passed to atomsnap_make_version(). 
@@ -203,27 +203,27 @@ The second function pointer is for deallocating an atomsnap_version. This functi
 Here is an example:
 ```
 struct atomsnap_version *atomsnap_alloc_impl(void *arg) {
-	struct atomsnap_version *version = new atomsnap_version;
-	Data *data = new Data;
-	int *values = (int *)arg;
+    struct atomsnap_version *version = new atomsnap_version;
+    Data *data = new Data;
+    int *values = (int *)arg;
 
-	data->value1 = values[0];
-	data->value2 = values[1];
+    data->value1 = values[0];
+    data->value2 = values[1];
 
-	version->object = data;
-	version->free_context = NULL;
+    version->object = data;
+    version->free_context = NULL;
 
-	return version;
+    return version;
 }
 
 void atomsnap_free_impl(struct atomsnap_version *version) {
-	delete (Data *)version->object;
-	delete version;
+    delete (Data *)version->object;
+    delete version;
 }
 
 struct atomsnap_init_context atomsnap_gate_ctx = {
-	.atomsnap_alloc_impl = atomsnap_alloc_impl,
-	.atomsnap_free_impl = atomsnap_free_impl
+    .atomsnap_alloc_impl = atomsnap_alloc_impl,
+    .atomsnap_free_impl = atomsnap_free_impl
 };
 
 atomsnap_gate *gate = atomsnap_init_gate(&atomsnap_gate_ctx);
@@ -233,33 +233,33 @@ Once the preparation steps are complete, the atomsnap_init_context can be passed
 
 ```
 void writer(std::barrier<> &sync) {
-	struct atomsnap_version *new_version;
-	int values[2];
+    struct atomsnap_version *new_version;
+    int values[2];
 
-	while (true) {
-		struct atomsnap_version *old_version = atomsnap_acquire_version(gate);
-		Data *old_data = static_cast<Data*>(old_version->object);
-		values[0] = old_data->value1 + 1;
-		values[1] = old_data->value2 + 1;
-		new_version = atomsnap_make_version(gate, (void*)values);
-		atomsnap_exchange_version(gate, new_version);
-		atomsnap_release_version(old_version);
-	}
+    while (true) {
+        struct atomsnap_version *old_version = atomsnap_acquire_version(gate);
+        Data *old_data = static_cast<Data*>(old_version->object);
+        values[0] = old_data->value1 + 1;
+        values[1] = old_data->value2 + 1;
+        new_version = atomsnap_make_version(gate, (void*)values);
+        atomsnap_exchange_version(gate, new_version);
+        atomsnap_release_version(old_version);
+    }
 }
 
 void reader(std::barrier<> &sync) {
-	struct atomsnap_version *current_version;
+    struct atomsnap_version *current_version;
 
-	while (true) {
-		current_version = atomsnap_acquire_version(gate);
-		Data *d = static_cast<Data*>(current_version->object);
-		if (d->value1 != d->value2) {
-			fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
-					d->value1, d->value2);
-			exit(1);
-		}
-		atomsnap_release_version(current_version);
-	}
+    while (true) {
+        current_version = atomsnap_acquire_version(gate);
+        Data *d = static_cast<Data*>(current_version->object);
+        if (d->value1 != d->value2) {
+            fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
+                d->value1, d->value2);
+            exit(1);
+        }
+        atomsnap_release_version(current_version);
+    }
 }
 ```
 
@@ -273,21 +273,23 @@ If the writer creates a new version regardless of the previous state, it can rep
 
 ```
 void writer(std::barrier<> &sync) {
-	struct atomsnap_version *new_version;
-	int values[2];
+    struct atomsnap_version *new_version;
+    int values[2];
 
-	while (true) {
-		struct atomsnap_version *old_version = atomsnap_acquire_version(gate);
-		auto old_data = static_cast<Data*>(old_version->object);
-		values[0] = old_data->value1 + 1;
-		values[1] = old_data->value2 + 1;
-		new_version = atomsnap_make_version(gate, (void*)values);
-		if (atomsnap_compare_exchange_version(gate,
-				old_version, new_version)) {
-			// do something
-		}
-		atomsnap_release_version(old_version); /* !!! Call this function after atomsnap_compare_exchange_version !!! */
-	}
+    while (true) {
+        struct atomsnap_version *old_version = atomsnap_acquire_version(gate);
+        auto old_data = static_cast<Data*>(old_version->object);
+        values[0] = old_data->value1 + 1;
+        values[1] = old_data->value2 + 1;
+        new_version = atomsnap_make_version(gate, (void*)values);
+        if (atomsnap_compare_exchange_version(gate,
+                old_version, new_version)) {
+            
+        } else {
+            atomsnap_free_impl(new_version);
+        }
+        atomsnap_release_version(old_version); /* !!! Call this function after atomsnap_compare_exchange_version !!! */
+    }
 }
 ```
 
@@ -298,3 +300,72 @@ For example, suppose Thread A obtains old_version and creates new_version based 
 To prevent this, atomsnap_release_version() for the old_version used in atomsnap_compare_exchange_version() must be called only after atomsnap_compare_exchange_version() has completed.
 
 # Evaluation
+
+### Environment
+
+- Hardware
+	- CPU: Intel Core i5-13400F (16 cores)
+	- RAM: 7.7 GB
+
+- Software
+	- OS: Ubuntu 24.04.1 LTS
+	- Compiler: GCC 13.3.0
+	- Build System: GNU Make 4.3
+
+All experiments were conducted for 100 seconds.
+
+### Stateless version changing
+
+```
+$ git clone https://github.com/minseok127/atomsnap.git
+$ cd atomsnap
+$ make
+$ cd example/exchange
+$ make
+```
+
+- Reader throughput (ops/sec)
+
+| Reader / Wrtier | std::shared_mutex | std::shared_ptr | atomsnap |
+|:---------------:|:-----------------:|:---------------:|:--------:|
+|	1 / 1 	  | 	   483,073    |    4,118,869    | 15,364,317 |
+|	2 / 2 	  |     10,806,981    |    3,919,675    | 12,911,508 |
+|	4 / 4 	  |     13,945,730    |    3,157,681    | 17,237,426 |
+|	8 / 8 	  | 	17,149,214    |    2,421,110    | 18,977,734 |
+
+- Writer throughput (ops/sec)
+
+| Reader / Wrtier | std::shared_mutex | std::shared_ptr | atomsnap |
+|:---------------:|:-----------------:|:---------------:|:--------:|
+|	1 / 1 	  | 	      395,415 |       2,290,178 | 6,536,867 |
+|	2 / 2 	  | 	      150,856 |       1,874,746 | 5,934,981 |
+|	4 / 4 	  | 	       27,958 |       1,419,709 | 7,147,858 |
+|	8 / 8 	  | 	        8,882 |       1,122,508 | 7,605,056 |
+
+### Stateful version changing
+
+```
+$ git clone https://github.com/minseok127/atomsnap.git
+$ cd atomsnap
+$ make
+$ cd example/cmp_exchange
+$ make
+```
+
+- Reader throughput (ops/sec)
+
+| Reader / Wrtier | std::shared_mutex | std::shared_ptr | atomsnap |
+|:---------------:|:-----------------:|:---------------:|:--------:|
+|	1 / 1 	  | 	   483,073    |    4,168,734    | 13,345,141 |
+|	2 / 2 	  |     10,806,981    |    3,790,341    | 14,037,157 |
+|	4 / 4 	  |     13,945,730    |    3,082,837    | 17,340,585 |
+|	8 / 8 	  | 	17,149,214    |    2,567,489    | 19,344,667 |
+
+- Writer throughput (ops/sec)
+
+| Reader / Wrtier | std::shared_mutex | std::shared_ptr | atomsnap |
+|:---------------:|:-----------------:|:---------------:|:--------:|
+|	1 / 1 	  | 	      395,415 |     2,152,445   | 6,104,996 |
+|	2 / 2 	  | 	      150,856 |     1,444,993   | 3,325,338 |
+|	4 / 4 	  | 	       27,958 |     1,103,961   | 2,238,743 |
+|	8 / 8 	  | 	        8,882 |       528,600   | 1,344,667 |
