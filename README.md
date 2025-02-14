@@ -125,7 +125,7 @@ Writers create a new Data instance, modify all necessary fields, and then replac
 
 ## Implementation with atomsnap (instead of std::shared_ptr)
 
-When implementing with atomsnap, just like creating a global_ptr using std::shared_ptr, an atomsnap_gate must be created. This data structure is allocated using the atomsnap_init_gate initialization function and deallocated using the atomsnap_destroy_gate function. To call the initialization function, an atomsnap_init_context data structure is required.
+When implementing with atomsnap, just like creating a global_ptr using std::shared_ptr, an atomsnap_gate must be created. This data structure is allocated using the atomsnap_init_gate() initialization function and deallocated using the atomsnap_destroy_gate() function. To call the initialization function, an atomsnap_init_context data structure is required.
 
 The user must provide two function pointers in the context. 
 
@@ -150,7 +150,7 @@ struct atomsnap_version *atomsnap_make_version(struct atomsnap_gate *gate,
 	void *alloc_arg);
 ```
 
-The first function is responsible for allocating an atomsnap_version structure. This function is later called inside atomsnap_make_version, which is used by writers to allocate an atomsnap_version structure. The allocation function receives its argument from the parameters passed to atomsnap_make_version. 
+The first function is responsible for allocating an atomsnap_version structure. This function is later called inside atomsnap_make_version(), which is used by writers to allocate an atomsnap_version structure. The allocation function receives its argument from the parameters passed to atomsnap_make_version(). 
 
 The second function pointer is for deallocating an atomsnap_version. This function is automatically called when all threads referencing the atomsnap_version have disappeared. The user can specify arguments for the free function by setting them in the free_context field of atomsnap_version.
 
@@ -183,7 +183,7 @@ struct atomsnap_init_context atomsnap_gate_ctx = {
 atomsnap_gate *gate = atomsnap_init_gate(&atomsnap_gate_ctx);
 ```
 
-Once the preparation steps are complete, the atomsnap_init_context can be passed as an argument to atomsnap_init_gate, which will return a pointer to an atomsnap_gate.
+Once the preparation steps are complete, the atomsnap_init_context can be passed as an argument to atomsnap_init_gate(), which will return a pointer to an atomsnap_gate.
 
 ```
 void writer(std::barrier<> &sync) {
@@ -217,13 +217,13 @@ void reader(std::barrier<> &sync) {
 }
 ```
 
-Just like obtaining global_ptr using atomic_load in std::shared_ptr, atomsnap allows acquiring the current version using atomsnap_acquire_version. This function must be used in pairs with atomsnap_release_version. The lifetime of the acquired version is guaranteed until atomsnap_release_version is called. Accessing the version after calling release is not safe and is not guaranteed to work correctly.
+Just like obtaining global_ptr using atomic_load in std::shared_ptr, atomsnap allows acquiring the current version using atomsnap_acquire_version(). This function must be used in pairs with atomsnap_release_version(). The lifetime of the acquired version is guaranteed until atomsnap_release_version() is called. Accessing the version after calling release is not safe and is not guaranteed to work correctly.
 
-Writers call the atomsnap_make_version function to allocate a new version. In this process, the allocation function pointer set during initialization is invoked, and the second argument of atomsnap_make_version is passed as an argument to the allocation function.
+Writers call the atomsnap_make_version() function to allocate a new version. In this process, the allocation function pointer set during initialization is invoked, and the second argument of atomsnap_make_version is passed as an argument to the allocation function.
 
 ## Caution for the writer when using CAS
 
-If the writer creates a new version regardless of the previous state, it can replace the version using the atomsnap_exchange_version function, as shown in the pseudocode above. On the other hand, if the writer is sensitive to the previous version's state, it may need to use atomsnap_compare_exchange_version to replace the version, as shown in the following pseudocode.
+If the writer creates a new version regardless of the previous state, it can replace the version using the atomsnap_exchange_version() function, as shown in the pseudocode above. On the other hand, if the writer is sensitive to the previous version's state, it may need to use atomsnap_compare_exchange_version() to replace the version, as shown in the following pseudocode.
 
 ```
 void writer(std::barrier<> &sync) {
@@ -245,10 +245,10 @@ void writer(std::barrier<> &sync) {
 }
 ```
 
-This function replaces the gate’s version with new_version only if old_version is the latest version of the gate. It returns true if the replacement succeeds and false otherwise. Note that calling atomsnap_release_version on old_version before atomsnap_compare_exchange_version can lead to an ABA problem.
+This function replaces the gate’s version with new_version only if old_version is the latest version of the gate. It returns true if the replacement succeeds and false otherwise. Note that calling atomsnap_release_version() on old_version before atomsnap_compare_exchange_version() can lead to an ABA problem.
 
-For example, suppose Thread A obtains old_version and creates new_version based on it. Before calling atomsnap_compare_exchange_version, it calls atomsnap_release_version, freeing old_version. Meanwhile, Thread B creates a new_version, its memory address accidentally matches that of the now-freed old_version. If Thread B successfully replaces the version in the gate, and Thread A then calls atomsnap_compare_exchange_version, Thread A would replace the version based on an invalid version (what we expect is for atomsnap_compare_exchange_version to fail since the replacement should be based on Thread B’s version).
+For example, suppose Thread A obtains old_version and creates new_version based on it. Before calling atomsnap_compare_exchange_version(), it calls atomsnap_release_version(), freeing old_version. Meanwhile, Thread B creates a new_version, its memory address accidentally matches that of the now-freed old_version. If Thread B successfully replaces the version in the gate, and Thread A then calls atomsnap_compare_exchange_version(), Thread A would replace the version based on an invalid version (what we expect is for atomsnap_compare_exchange_version() to fail since the replacement should be based on Thread B’s version).
 
-To prevent this, atomsnap_release_version for the old_version used in atomsnap_compare_exchange_version must be called only after atomsnap_compare_exchange_version has completed.
+To prevent this, atomsnap_release_version() for the old_version used in atomsnap_compare_exchange_version() must be called only after atomsnap_compare_exchange_version() has completed.
 
 # Evaluation (std::shared_ptr vs atomsnap)
