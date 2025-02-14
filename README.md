@@ -7,7 +7,8 @@
 
 ### Reader & Writer Behavior:
 
-- Readers: Instantly obtain a pointer without failure
+- Readers: 
+	- Instantly obtain a pointer without failure
 - Writers:
 	- Use TAS (Test-And-Set) for guaranteed updates.
 	- Use CAS (Compare-And-Swap) with a retry mechanism if needed.
