@@ -81,7 +81,7 @@ $ make
 		- Unconditionally replaces the gate’s version with the given version.
 	- atomsnap_compare_exchange_version(gate, old_version, new_version) 
 		- Replaces the gate’s version only if the latest version matches old_version.
-		- Returns true on success.
+		- Returns true on success, false otherwise.
 
 # Example
 
