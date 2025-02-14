@@ -131,7 +131,7 @@ void reader(std::barrier<> &sync) {
 }
 ```
 
-Writers acquire a unique_lock on the shared_mutex to modify the value, while readers acquire a shared_lock to read it. Since they operate on the same object pointer, there is no need for additional memory management for object deallocation.
+Writers acquire a unique_lock on the shared_mutex to modify the value, while readers acquire a shared_lock to read it. Since they operate on the same object pointer, there is no need for additional memory management for Data deallocation.
 
 ## with std::shared_ptr
 ```
