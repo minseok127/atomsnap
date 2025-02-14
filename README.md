@@ -137,7 +137,7 @@ void reader(std::barrier<> &sync) {
 }
 ```
 
-Writers acquire a unique_lock on the shared_mutex to modify the value, while readers acquire a shared_lock to read it. Since they operate on the same object pointer, there is no need for additional memory management for Data deallocation.
+Writers acquire a unique_lock on the shared_mutex to modify the value, while readers acquire a shared_lock to read it. Readers and writers operate on the same object pointer. So we don't need to deallocate the object until the workload is complete.
 
 ## with std::shared_ptr
 ```
@@ -173,7 +173,7 @@ void reader(std::barrier<> &sync) {
 }
 
 ```
-Writers create a new Data instance, modify all necessary fields, and then replace the old version with the new one in an atomic operation. Readers always access a fully consistent snapshot of Data, ensuring they never observe partially modified values.
+Writers create a new Data instance, modify all necessary fields, and then replace the old version with the new one in an atomic operation. Readers always access a fully consistent snapshot of Data, ensuring they never observe partially modified values. Since both readers and writers use std::shared_ptr, safe memory deallocation of Data is guaranteed.
 
 ## with atomsnap
 
