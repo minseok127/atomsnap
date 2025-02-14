@@ -316,7 +316,7 @@ To prevent this, atomsnap_release_version() for the old_version used in atomsnap
 
 - Hardware
 	- CPU: Intel Core i5-13400F (16 cores)
-	- RAM: 7.7 GB
+	- RAM: 16GB DDR5 5600MHz
 
 - Software
 	- OS: Ubuntu 24.04.1 LTS
