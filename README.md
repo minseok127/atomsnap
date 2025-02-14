@@ -32,7 +32,32 @@ $ make
 => libatomsnap.a, libatomsnap.so, atomsnap.h
 ```
 
-# API overview:
+# Data Structure:
+
+- struct atomsnap_gate
+	- Synchronization point that manages versioned object in a multi-threaded environment.
+	- Readers and writers accessing the same gate handle different versions of the same object.
+
+- struct atomsnap_init_context
+	- Passed as an argument to atomsnap_init_gate().
+	- Contains user-defined function pointers for managing memory allocation and deallocation of atomsnap_version objects.
+	- Fields:
+		- atomsnap_alloc_impl → Custom memory allocation function.
+		- atomsnap_free_impl → Custom memory deallocation function.
+
+- struct atomsnap_version (Versioned Object)
+	- Represents a specific version of an object.
+	- Fields:
+		- object → Pointer to the actual data for this version.
+		- free_context → User-defined context for the free function.
+		- gate → Identifies the atomsnap_gate this version belongs to.
+		- opaque → Internal version management data, not user-modifiable.
+	- Usage:
+		- Writers create a version using atomsnap_make_version().
+		- After creation, writers assign their object to object and set free_context for cleanup.
+		- gate and opaque are initialized internally and should not be modified.
+
+# API:
 
 - Gate Management
 	- atomsnap_init_gate(ctx)
