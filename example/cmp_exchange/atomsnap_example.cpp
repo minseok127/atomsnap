@@ -64,6 +64,8 @@ void writer(std::barrier<> &sync) {
 		if (atomsnap_compare_exchange_version(gate,
 				old_version, new_version)) {
 			ops++;
+		} else {
+			atomsnap_free_impl(new_version);
 		}
 		atomsnap_release_version(old_version);
 	}
