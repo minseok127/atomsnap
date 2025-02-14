@@ -2,12 +2,12 @@
 
 ### Purpose:
 
-- Multi-Version Management in a Multi-Threaded Environment
+- Multi-Version Management in a Multi-Threaded Environment:
 	- Atomically manages multiple versions of an object.
 	- Readers should only see the object that is either entirely unmodified or fully updated. 
 	- So writers do not modify the object in place; instead, they copy it, update the data, and then register a new version.
 
-- Performance and Safety
+- Performance and Safety:
 	- Ensures wait-free access.
 	- Guarantees safe memory release.
 
@@ -15,6 +15,7 @@
 
 - Readers: 
 	- Instantly obtain a pointer without failure
+
 - Writers:
 	- Use TAS (Test-And-Set) for guaranteed updates.
 	- Use CAS (Compare-And-Swap) with a retry mechanism if needed.
