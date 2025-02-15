@@ -366,7 +366,7 @@ $ make
 
 - Reader throughput (ops/sec)
 
-| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spin_lock | atomsnap |
+| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spinlock_t | atomsnap |
 |:---------------:|:-----------------:|:---------------:|:--------:|:--------:|
 |	1 / 1 	  | 	   483,073    |    4,168,734    | 13,861,844 | 13,345,141 |
 |	2 / 2 	  |     10,806,981    |    3,790,341    | 7,474,572 | 14,037,157 |
@@ -376,7 +376,7 @@ $ make
 
 - Writer throughput (ops/sec)
 
-| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spin_lock | atomsnap |
+| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spinlock_t | atomsnap |
 |:---------------:|:-----------------:|:---------------:|:--------:|:--------:|
 |	1 / 1 	  | 	      395,415 |     2,152,445   | 13,621,219 | 6,104,996 |
 |	2 / 2 	  | 	      150,856 |     1,444,993   | 5,589,843 | 3,325,338 |
