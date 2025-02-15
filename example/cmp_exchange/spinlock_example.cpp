@@ -8,7 +8,7 @@
 #include <barrier>
 #include <iomanip>
 #include <mutex>
-#include <shared_mutex>
+#include <pthread.h>
 
 std::atomic<size_t> total_writer_ops{0};
 std::atomic<size_t> total_reader_ops{0};
@@ -21,7 +21,7 @@ struct Data {
 
 Data *global_ptr = new Data{0, 0};
 
-std::shared_mutex rwlock;
+pthread_spinlock_t spinlock;
 
 void writer(std::barrier<> &sync) {
 	sync.arrive_and_wait();
@@ -38,9 +38,10 @@ void writer(std::barrier<> &sync) {
 		}
 
 		{
-			std::unique_lock<std::shared_mutex> lock(rwlock);
+			pthread_spin_lock(&spinlock);
 			global_ptr->value1 = global_ptr->value1 + 1;
 			global_ptr->value2 = global_ptr->value2 + 1;
+			pthread_spin_unlock(&spinlock);
 		}
 
 		ops++;
@@ -65,9 +66,10 @@ void reader(std::barrier<> &sync) {
 
 		int64_t v1, v2;
 		{
-			std::shared_lock<std::shared_mutex> lock(rwlock);
+			pthread_spin_lock(&spinlock);
 			v1 = global_ptr->value1;
 			v2 = global_ptr->value2;
+			pthread_spin_unlock(&spinlock);
 		}
 
 		if (v1 != v2) {
@@ -98,6 +100,8 @@ int main(int argc, char **argv) {
 		std::cerr << "Invalid arguments\n";
 		return -1;
 	}
+
+	pthread_spin_init(&spinlock, PTHREAD_PROCESS_PRIVATE);
 
 	std::barrier sync(writer_count + reader_count);
 	std::vector<std::thread> threads;
