@@ -2,8 +2,7 @@
 
 ### Purpose
 
-- Multi-Version Management in a Multi-Threaded Environment.
-	- Atomically manages multiple versions of an object.
+- Atomically manages multiple versions of an object.
 	- Readers should only see the object that is either entirely unmodified or fully updated. 
 	- Writers do not modify the object in place; instead, they copy it, update the data, and change the object pointer into the new version.
 
