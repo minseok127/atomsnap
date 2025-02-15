@@ -324,7 +324,7 @@ To prevent this, atomsnap_release_version() for the old_version used in atomsnap
 
 All experiments were conducted for 100 seconds.
 
-### Stateless version changing
+### Stateless version changing (16-bytes object)
 
 ```
 $ git clone https://github.com/minseok127/atomsnap.git
@@ -354,7 +354,7 @@ $ make
 |	8 / 8 	  | 	    1,122,508 | 7,605,056 |
 |      16 / 16	  | 	      1,356,290 | 7,342,350 |
 
-### Stateful version changing (competition among writers)
+### Stateful version changing (16-bytes object, competition among writers)
 
 ```
 $ git clone https://github.com/minseok127/atomsnap.git
