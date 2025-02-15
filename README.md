@@ -8,7 +8,7 @@
 
 - Performance and Safety.
 	- Ensures wait-free access.
-	- Guarantees safe version memory release.
+	- Guarantees safe memory release.
 
 ### Reader & Writer Behavior
 
