@@ -13,7 +13,7 @@
 ### Reader & Writer Behavior
 
 - Readers
-	- Instantly obtain a pointer without failure.
+	- Instantly obtain a version pointer without failure.
 
 - Writers
 	- Use TAS (Test-And-Set) for guaranteed updates.
