@@ -53,6 +53,7 @@ void reader(std::barrier<> &sync) {
 	sync.arrive_and_wait();
 	auto start = std::chrono::steady_clock::now();
 	size_t ops = 0;
+	int64_t prev_value = 0;
 
 	while (true) {
 		auto now = std::chrono::steady_clock::now();
@@ -75,6 +76,14 @@ void reader(std::barrier<> &sync) {
 					v1, v2);
 			exit(1);
 		}
+
+		if (v1 < prev_value) {
+			fprintf(stderr, "Invalid value, prev: %ld, now: %ld\n",
+					prev_value, v1);
+			exit(1);
+		}
+		prev_value = v1;
+
 		ops++;
 	}
 

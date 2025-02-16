@@ -15,11 +15,10 @@ std::atomic<size_t> total_reader_ops{0};
 int duration_seconds = 0;
 
 struct Data {
-	int64_t value1;
-	int64_t value2;
+	int64_t values[512];
 };
 
-Data *global_ptr = new Data{0, 0};
+Data *global_ptr = new Data{ 0, };
 
 pthread_spinlock_t spinlock;
 
@@ -39,8 +38,11 @@ void writer(std::barrier<> &sync) {
 
 		{
 			pthread_spin_lock(&spinlock);
-			global_ptr->value1 = global_ptr->value1 + 1;
-			global_ptr->value2 = global_ptr->value2 + 1;
+
+			for (int i = 0; i < 512; i++) {
+				global_ptr->values[i] += 1;
+			}
+
 			pthread_spin_unlock(&spinlock);
 		}
 
@@ -54,7 +56,7 @@ void reader(std::barrier<> &sync) {
 	sync.arrive_and_wait();
 	auto start = std::chrono::steady_clock::now();
 	size_t ops = 0;
-	int64_t prev_value = 0;
+	int64_t prev_value = 0, current_value = 0;
 
 	while (true) {
 		auto now = std::chrono::steady_clock::now();
@@ -65,26 +67,27 @@ void reader(std::barrier<> &sync) {
 			break;
 		}
 
-		int64_t v1, v2;
 		{
 			pthread_spin_lock(&spinlock);
-			v1 = global_ptr->value1;
-			v2 = global_ptr->value2;
+
+			current_value = global_ptr->values[0];
+
+			for (int i = 0; i < 512; i++) {
+				if (global_ptr->values[i] != current_value) {
+					fprintf(stderr, "Invalid data\n");
+					exit(1);
+				}
+			}
+
 			pthread_spin_unlock(&spinlock);
 		}
 
-		if (v1 != v2) {
-			fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
-					v1, v2);
-			exit(1);
+		if (current_value < prev_value) {
+			fprintf(stderr, "Invalid value, prev: %ld, now: %ld\n",
+				prev_value, current_value);
 		}
 
-		if (v1 < prev_value) {
-			fprintf(stderr, "Invalid value, prev: %ld, now: %ld\n",
-					prev_value, v1);
-			exit(1);
-		}
-		prev_value = v1;
+		prev_value = current_value;
 
 		ops++;
 	}

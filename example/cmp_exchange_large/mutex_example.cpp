@@ -8,20 +8,19 @@
 #include <barrier>
 #include <iomanip>
 #include <mutex>
-#include <pthread.h>
+#include <shared_mutex>
 
 std::atomic<size_t> total_writer_ops{0};
 std::atomic<size_t> total_reader_ops{0};
 int duration_seconds = 0;
 
 struct Data {
-	int64_t value1;
-	int64_t value2;
+	int64_t values[512];
 };
 
-Data *global_ptr = new Data{0, 0};
+Data *global_ptr = new Data{ 0, };
 
-pthread_spinlock_t spinlock;
+std::shared_mutex rwlock;
 
 void writer(std::barrier<> &sync) {
 	sync.arrive_and_wait();
@@ -38,10 +37,11 @@ void writer(std::barrier<> &sync) {
 		}
 
 		{
-			pthread_spin_lock(&spinlock);
-			global_ptr->value1 = global_ptr->value1 + 1;
-			global_ptr->value2 = global_ptr->value2 + 1;
-			pthread_spin_unlock(&spinlock);
+			std::unique_lock<std::shared_mutex> lock(rwlock);
+
+			for (int i = 0; i < 512; i++) {
+				global_ptr->values[i] += 1;
+			}
 		}
 
 		ops++;
@@ -54,7 +54,7 @@ void reader(std::barrier<> &sync) {
 	sync.arrive_and_wait();
 	auto start = std::chrono::steady_clock::now();
 	size_t ops = 0;
-	int64_t prev_value = 0;
+	int64_t prev_value = 0, current_value = 0;
 
 	while (true) {
 		auto now = std::chrono::steady_clock::now();
@@ -65,26 +65,25 @@ void reader(std::barrier<> &sync) {
 			break;
 		}
 
-		int64_t v1, v2;
 		{
-			pthread_spin_lock(&spinlock);
-			v1 = global_ptr->value1;
-			v2 = global_ptr->value2;
-			pthread_spin_unlock(&spinlock);
+			std::shared_lock<std::shared_mutex> lock(rwlock);
+			current_value = global_ptr->values[0];
+
+			for (int i = 0; i < 512; i++) {
+				if (global_ptr->values[i] != current_value) {
+					fprintf(stderr, "Invalid data\n");
+					exit(1);
+				}
+			}
 		}
 
-		if (v1 != v2) {
-			fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
-					v1, v2);
-			exit(1);
-		}
-
-		if (v1 < prev_value) {
+		if (current_value < prev_value) {
 			fprintf(stderr, "Invalid value, prev: %ld, now: %ld\n",
-					prev_value, v1);
+				prev_value, current_value);
 			exit(1);
 		}
-		prev_value = v1;
+
+		prev_value = current_value;
 
 		ops++;
 	}
@@ -109,8 +108,6 @@ int main(int argc, char **argv) {
 		std::cerr << "Invalid arguments\n";
 		return -1;
 	}
-
-	pthread_spin_init(&spinlock, PTHREAD_PROCESS_PRIVATE);
 
 	std::barrier sync(writer_count + reader_count);
 	std::vector<std::thread> threads;

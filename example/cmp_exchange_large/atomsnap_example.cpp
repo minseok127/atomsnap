@@ -7,26 +7,44 @@
 #include <vector>
 #include <barrier>
 #include <iomanip>
-#include <mutex>
-#include <pthread.h>
+
+#include "../../atomsnap.h"
 
 std::atomic<size_t> total_writer_ops{0};
 std::atomic<size_t> total_reader_ops{0};
 int duration_seconds = 0;
 
 struct Data {
-	int64_t value1;
-	int64_t value2;
+	int64_t values[512];
 };
 
-Data *global_ptr = new Data{0, 0};
+struct atomsnap_gate *gate = NULL;
 
-pthread_spinlock_t spinlock;
+struct atomsnap_version *atomsnap_alloc_impl(void *arg) {
+	auto version = new atomsnap_version;
+	auto data = new Data;
+	int *values = (int *)arg;
+
+	for (int i = 0; i < 512; i++) {
+		data->values[i] = values[i];
+	}
+
+	version->object = data;
+	version->free_context = NULL;
+
+	return version;
+}
+
+void atomsnap_free_impl(struct atomsnap_version *version) {
+	delete (Data *)version->object;
+	delete version;
+}
 
 void writer(std::barrier<> &sync) {
 	sync.arrive_and_wait();
 	auto start = std::chrono::steady_clock::now();
 	size_t ops = 0;
+	struct atomsnap_version *new_version;
 
 	while (true) {
 		auto now = std::chrono::steady_clock::now();
@@ -37,14 +55,16 @@ void writer(std::barrier<> &sync) {
 			break;
 		}
 
-		{
-			pthread_spin_lock(&spinlock);
-			global_ptr->value1 = global_ptr->value1 + 1;
-			global_ptr->value2 = global_ptr->value2 + 1;
-			pthread_spin_unlock(&spinlock);
+		struct atomsnap_version *old_version = atomsnap_acquire_version(gate);
+		auto old_data = static_cast<Data*>(old_version->object);
+		new_version = atomsnap_make_version(gate, (void*)old_data->values);
+		if (atomsnap_compare_exchange_version(gate,
+				old_version, new_version)) {
+			ops++;
+		} else {
+			atomsnap_free_impl(new_version);
 		}
-
-		ops++;
+		atomsnap_release_version(old_version);
 	}
 
 	total_writer_ops.fetch_add(ops, std::memory_order_relaxed);
@@ -54,7 +74,8 @@ void reader(std::barrier<> &sync) {
 	sync.arrive_and_wait();
 	auto start = std::chrono::steady_clock::now();
 	size_t ops = 0;
-	int64_t prev_value = 0;
+	struct atomsnap_version *current_version;
+	int64_t prev_value = 0, current_value = 0;
 
 	while (true) {
 		auto now = std::chrono::steady_clock::now();
@@ -65,26 +86,22 @@ void reader(std::barrier<> &sync) {
 			break;
 		}
 
-		int64_t v1, v2;
-		{
-			pthread_spin_lock(&spinlock);
-			v1 = global_ptr->value1;
-			v2 = global_ptr->value2;
-			pthread_spin_unlock(&spinlock);
+		current_version = atomsnap_acquire_version(gate);
+		Data *d = static_cast<Data*>(current_version->object);
+		current_value = d->values[0];
+		for (int i = 0; i < 512; i++) {
+			if (d->values[i] != current_value) {
+				fprintf(stderr, "Invalid data\n");
+				exit(1);
+			}
 		}
-
-		if (v1 != v2) {
-			fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
-					v1, v2);
-			exit(1);
-		}
-
-		if (v1 < prev_value) {
+		if (current_value < prev_value) {
 			fprintf(stderr, "Invalid value, prev: %ld, now: %ld\n",
-					prev_value, v1);
+					prev_value, current_value);
 			exit(1);
 		}
-		prev_value = v1;
+		prev_value = current_value;
+		atomsnap_release_version(current_version);
 
 		ops++;
 	}
@@ -110,7 +127,21 @@ int main(int argc, char **argv) {
 		return -1;
 	}
 
-	pthread_spin_init(&spinlock, PTHREAD_PROCESS_PRIVATE);
+	struct atomsnap_init_context atomsnap_gate_ctx = {
+		.atomsnap_alloc_impl = atomsnap_alloc_impl,
+		.atomsnap_free_impl = atomsnap_free_impl
+	};
+
+	gate = atomsnap_init_gate(&atomsnap_gate_ctx);
+	if (!gate) {
+		std::cerr << "Failed to init atomsnap_gate\n";
+		return -1;
+	}
+
+	int values[2] = { 0, 0 };
+	struct atomsnap_version *initial_version
+		= atomsnap_make_version(gate, (void *)values);
+	atomsnap_exchange_version(gate, initial_version);
 
 	std::barrier sync(writer_count + reader_count);
 	std::vector<std::thread> threads;
