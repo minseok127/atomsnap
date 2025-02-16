@@ -311,7 +311,7 @@ To prevent this, atomsnap_release_version() for the old_version used in atomsnap
 
 # Evaluation
 
-### Environment
+## Environment
 
 - Hardware
 	- CPU: Intel Core i5-13400F (16 cores)
@@ -324,7 +324,7 @@ To prevent this, atomsnap_release_version() for the old_version used in atomsnap
 
 All experiments were conducted for 100 seconds.
 
-### Stateless modification for small object (16 bytes object)
+## Stateless modification (16 bytes object, TAS)
 
 ```
 $ git clone https://github.com/minseok127/atomsnap.git
@@ -354,7 +354,7 @@ $ make
 |	  8 / 8 	 |     1,122,508   | 7,605,056  |
 |        16 / 16	 |     1,356,290   | 7,342,350  |
 
-### Stateful modification for small object (16 bytes object, competition among writers)
+## Stateful modification (16 bytes object, CAS)
 
 ```
 $ git clone https://github.com/minseok127/atomsnap.git
@@ -384,7 +384,7 @@ $ make
 |	  8 / 8 	 | 	    8,882    |      528,600    |      2,639,648     |  1,344,667 |
 |        16 / 16	 | 	       11    |      693,230    |      1,639,855     |  1,324,588 |
 
-### Stateful modification for large object (4 KB object, competition among writers)
+## Stateful modification (4 KB object, CAS)
 
 ```
 $ git clone https://github.com/minseok127/atomsnap.git
@@ -414,7 +414,7 @@ $ make
 |	  8 / 8 	 | 	   2,322     |       416,472   |      2,424,839     |  1,423,559 |
 |        16 / 16	 | 	       5     |       455,773   |      1,489,894     |  1,425,100 |
 
-### Stateful modification for small object, R/W unbalanced (16 bytes object, competition among writers)
+## Stateful modification (16 bytes object, CAS, R/W unbalanced)
 
 ```
 $ git clone https://github.com/minseok127/atomsnap.git
