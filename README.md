@@ -406,10 +406,34 @@ $ make
 
 - Writer throughput (ops/sec)
 
-| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spinlock_t | atomsnap |
-|:----------------------:|:-----------------:|:---------------:|:------------------:|:--------:|
-|	  1 / 1 	 | 	  83,167     |     1,587,131   |      4,427,044     | 2,104,934 |
-|	  2 / 2 	 | 	  30,287     |       967,290   |      4,167,675     | 1,771,074 |
-|	  4 / 4 	 | 	     336     |       617,992   |      3,768,093     | 1,520,589 |
-|	  8 / 8 	 | 	   2,322     |       416,472   |      2,424,839     | 1,423,559 |
-|        16 / 16	 | 	       5     |       455,773   |      1,489,894     | 1,425,100 |
+| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spinlock_t |  atomsnap  |
+|:----------------------:|:-----------------:|:---------------:|:------------------:|:----------:|
+|	  1 / 1 	 | 	  83,167     |     1,587,131   |      4,427,044     |  2,104,934 |
+|	  2 / 2 	 | 	  30,287     |       967,290   |      4,167,675     |  1,771,074 |
+|	  4 / 4 	 | 	     336     |       617,992   |      3,768,093     |  1,520,589 |
+|	  8 / 8 	 | 	   2,322     |       416,472   |      2,424,839     |  1,423,559 |
+|        16 / 16	 | 	       5     |       455,773   |      1,489,894     |  1,425,100 |
+
+### Stateful modification for small object, R/W unbalanced (16 bytes object, competition among writers)
+
+```
+$ git clone https://github.com/minseok127/atomsnap.git
+$ cd atomsnap
+$ make
+$ cd example/cmp_exchange
+$ make
+```
+
+- Reader throughput (ops/sec)
+
+| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spinlock_t |  atomsnap  |
+|:----------------------:|:-----------------:|:---------------:|:------------------:|:----------:|
+|	 1 / 16 	 |     8,620,295     |      234,983    |        347,163     |  2,796,784 |
+|	 16 /  1 	 |    18,221,686     |    5,208,506    |      5,079,128     | 43,766,774 |
+
+- Writer throughput (ops/sec)
+
+| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spinlock_t |  atomsnap  |
+|:----------------------:|:-----------------:|:---------------:|:------------------:|:----------:|
+|	  1 / 16 	 | 	 630,098     |     1,618,858   |      6,251,655     |  1,929,570 |
+|	  16 / 1 	 | 	       1     |       129,827   |        328,145     |    549,203 |
