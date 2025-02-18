@@ -37,6 +37,13 @@
  * this reader is the last user of that version. If the writer's release operation
  * makes the inner counter to reach 0, this writer is the last user of that version.
  * Then the last user (reader or writer) can free the old version.
+ *
+ * cf) Why we divide the reference counter into two?
+ * Because it is only possible to increment the reference counter in an 8-byte 
+ * control block, but it is not possible to decrement. The reader wants to decrease
+ * the reference count at the end. But the writer may changed the control block 
+ * to the other version, so the reader can't use it. So, the reader must notice 
+ * to the other reference counter, inner counter.
  */
 
 #include <stdio.h>
