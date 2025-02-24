@@ -182,7 +182,7 @@ void atomsnap_release_version(struct atomsnap_version *version)
 	struct atomsnap_gate *gate;
 	int64_t inner_refcnt;
 
-	if (version == NULL) {
+	if (version == NULL || version->gate == NULL) {
 		return;
 	}
 
@@ -190,8 +190,6 @@ void atomsnap_release_version(struct atomsnap_version *version)
 
 	if (inner_refcnt == 0) {
 		gate = version->gate;
-		assert(gate != NULL);
-		assert(gate->atomsnap_free_impl != NULL);
 		gate->atomsnap_free_impl(version);
 	}
 }
@@ -211,7 +209,9 @@ void atomsnap_exchange_version(struct atomsnap_gate *gate,
 	struct atomsnap_version *old_version;
 	int64_t inner_refcnt;
 
-	assert(gate != NULL);
+	if (gate == NULL) {
+		return;
+	}
 
 	old_outer = atomic_exchange(&gate->control_block, 
 		(uint64_t)new_version);
@@ -237,7 +237,6 @@ void atomsnap_exchange_version(struct atomsnap_gate *gate,
 	assert(inner_refcnt <= 0);
 
 	if (inner_refcnt == 0) {
-		assert(gate->atomsnap_free_impl != NULL);
 		gate->atomsnap_free_impl(old_version);
 	}
 }
@@ -258,7 +257,9 @@ bool atomsnap_compare_exchange_version(struct atomsnap_gate *gate,
 	uint64_t old_outer, old_outer_refcnt;
 	int64_t inner_refcnt;
 
-	assert(gate != NULL);
+	if (gate == NULL) {
+		return false;
+	}
 
 	old_outer = atomic_load(&gate->control_block);
 
@@ -291,7 +292,6 @@ bool atomsnap_compare_exchange_version(struct atomsnap_gate *gate,
 	assert(inner_refcnt <= 0);
 
 	if (inner_refcnt == 0) {
-		assert(gate->atomsnap_free_impl != NULL);
 		gate->atomsnap_free_impl(old_version);
 	}
 
