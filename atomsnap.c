@@ -239,14 +239,11 @@ bool atomsnap_compare_exchange_version(struct atomsnap_gate *gate,
 
 	old_outer = atomic_load(&gate->control_block);
 
-	if (old_version != (struct atomsnap_version *)GET_OUTER_PTR(old_outer)) {
+	if (old_version != (struct atomsnap_version *)GET_OUTER_PTR(old_outer)
+			|| !atomic_compare_exchange_weak(&gate->control_block,
+					&old_outer, (uint64_t)new_version)) {
 		return false;
-	}
-
-	if (!atomic_compare_exchange_weak(&gate->control_block,
-			&old_outer, (uint64_t)new_version)) {
-		return false;
-	}
+	} 
 
 	if (old_version == NULL) {
 		return true;
