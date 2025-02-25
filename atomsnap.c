@@ -134,8 +134,10 @@ struct atomsnap_version *atomsnap_make_version(struct atomsnap_gate *gate,
 {
 	struct atomsnap_version *new_version = gate->atomsnap_alloc_impl(alloc_arg);
 
-	atomic_store(&new_version->gate, gate);
-	atomic_store((int64_t *)(&new_version->opaque), 0);
+	if (new_version != NULL) {
+		atomic_store(&new_version->gate, gate);
+		atomic_store((int64_t *)(&new_version->opaque), 0);
+	}
 
 	return new_version;
 }
