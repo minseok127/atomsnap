@@ -98,6 +98,7 @@ struct atomsnap_gate *atomsnap_init_gate(struct atomsnap_init_context *ctx)
 
 	if (gate->atomsnap_alloc_impl == NULL || gate->atomsnap_free_impl == NULL) {
 		free(gate);
+		fprintf(stderr, "atomsnap_init_gate: invalid alloc/free function\n");
 		return NULL;
 	}
 
@@ -131,13 +132,7 @@ void atomsnap_destroy_gate(struct atomsnap_gate *gate)
 struct atomsnap_version *atomsnap_make_version(struct atomsnap_gate *gate,
 	void *alloc_arg)
 {
-	struct atomsnap_version *new_version;
-
-	if (gate == NULL) {
-		return NULL;
-	}
-
-	new_version = gate->atomsnap_alloc_impl(alloc_arg);
+	struct atomsnap_version *new_version = gate->atomsnap_alloc_impl(alloc_arg);
 
 	atomic_store(&new_version->gate, gate);
 	atomic_store((int64_t *)(&new_version->opaque), 0);
@@ -154,14 +149,7 @@ struct atomsnap_version *atomsnap_make_version(struct atomsnap_gate *gate,
  */
 struct atomsnap_version *atomsnap_acquire_version(struct atomsnap_gate *gate)
 {
-	uint64_t outer;
-
-	if (gate == NULL) {
-		return NULL;
-	}
-
-	outer = atomic_fetch_add(&gate->control_block, OUTER_REF_CNT);
-
+	uint64_t outer = atomic_fetch_add(&gate->control_block, OUTER_REF_CNT);
 	return (struct atomsnap_version *)GET_OUTER_PTR(outer);
 }
 
@@ -179,17 +167,11 @@ struct atomsnap_version *atomsnap_acquire_version(struct atomsnap_gate *gate)
  */
 void atomsnap_release_version(struct atomsnap_version *version)
 {
-	struct atomsnap_gate *gate;
-	int64_t inner_refcnt;
-
-	if (version == NULL || version->gate == NULL) {
-		return;
-	}
-
-	inner_refcnt = atomic_fetch_add((int64_t *)(&version->opaque), 1) + 1;
+	struct atomsnap_gate *gate = version->gate;
+	int64_t inner_refcnt 
+		= atomic_fetch_add((int64_t *)(&version->opaque), 1) + 1;
 
 	if (inner_refcnt == 0) {
-		gate = version->gate;
 		gate->atomsnap_free_impl(version);
 	}
 }
@@ -208,10 +190,6 @@ void atomsnap_exchange_version(struct atomsnap_gate *gate,
 	uint64_t old_outer, old_outer_refcnt;
 	struct atomsnap_version *old_version;
 	int64_t inner_refcnt;
-
-	if (gate == NULL) {
-		return;
-	}
 
 	old_outer = atomic_exchange(&gate->control_block, 
 		(uint64_t)new_version);
@@ -256,10 +234,6 @@ bool atomsnap_compare_exchange_version(struct atomsnap_gate *gate,
 {
 	uint64_t old_outer, old_outer_refcnt;
 	int64_t inner_refcnt;
-
-	if (gate == NULL) {
-		return false;
-	}
 
 	old_outer = atomic_load(&gate->control_block);
 
