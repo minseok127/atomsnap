@@ -1,5 +1,7 @@
 # ATOMSNAP
 
+A library for managing the grace period.
+
 ### Purpose
 
 - Atomically manages multiple versions of an object.
