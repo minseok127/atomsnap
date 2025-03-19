@@ -1,6 +1,6 @@
 # ATOMSNAP
 
-A library for managing the grace period.
+A library for managing a grace period.
 
 ### Purpose
 
