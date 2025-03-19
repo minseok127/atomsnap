@@ -1,11 +1,9 @@
 /*
- * atomsnap.c - Atomic multi-version concurrency control library
- *
- * This file implements an mvcc mechanism for managing a pointer to a consistent
- * state along with reference counts. The design packs an outer reference count
- * and a version pointer into a single 64-bit control block stored in the
- * atomsnap_gate structure, while the version itself (atomsnap_version) maintains an
- * inner reference count.
+ * This file implements an grace-period mechanism for managing a pointer.
+ * The design packs an outer reference count and a version pointer into 
+ * a single 64-bit control block stored in the atomsnap_gate structure, 
+ * while the version itself (atomsnap_version) maintains an inner 
+ * reference count.
  *
  * The 8-byte control block in atomsnap_gate is structured as follows:
  *   - Upper 16 bits: outer reference counter.
