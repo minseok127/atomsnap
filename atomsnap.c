@@ -1,5 +1,5 @@
 /*
- * This file implements an grace-period mechanism for managing a pointer.
+ * This file implements a grace-period mechanism for managing a pointer.
  * The design packs an outer reference count and a version pointer into 
  * a single 64-bit control block stored in the atomsnap_gate structure, 
  * while the version itself (atomsnap_version) maintains an inner 
