@@ -330,6 +330,7 @@ All experiments were conducted for 100 seconds.
 
 ```
 $ git clone https://github.com/minseok127/atomsnap.git
+$ git checkout test
 $ cd atomsnap
 $ make
 $ cd example/exchange
@@ -360,6 +361,7 @@ $ make
 
 ```
 $ git clone https://github.com/minseok127/atomsnap.git
+$ git checkout test
 $ cd atomsnap
 $ make
 $ cd example/cmp_exchange
@@ -390,6 +392,7 @@ $ make
 
 ```
 $ git clone https://github.com/minseok127/atomsnap.git
+$ git checkout test
 $ cd atomsnap
 $ make
 $ cd example/cmp_exchange_large
@@ -420,6 +423,7 @@ $ make
 
 ```
 $ git clone https://github.com/minseok127/atomsnap.git
+$ git checkout test
 $ cd atomsnap
 $ make
 $ cd example/cmp_exchange
