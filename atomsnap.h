@@ -97,7 +97,7 @@ struct atomsnap_version *atomsnap_acquire_version_slot(
 	struct atomsnap_gate *gate, int slot_idx);
 
 /*
- * This function pairs with atomsanp_acquire_version(). It must be called when
+ * This function pairs with atomsnap_acquire_version(). It must be called when
  * the usage of a version is complete. Within this version, if it is ensured
  * that no threads are referencing the given version, the user-defined version
  * free function is invoked.

@@ -67,10 +67,10 @@
 /*
  * atomsnap_gate - gate for atomic version read/write
  * @atomsnap_alloc_impl: user-defined memory allocation function
- * @atomsanp_free_impl: user-defined memory free function
+ * @atomsnap_free_impl: user-defined memory free function
  * @control_block: control block to manage multi-versions
  * @extra_control_blocks: array of extra control blocks
- * @num_extra_blocks: number of extra control blocks
+ * @num_extra_control_blocks: number of extra control blocks
  *
  * Writers use atomsnap_gate to atomically register their object version.
  * Readers also use this gate to get the object and release safely.
@@ -80,7 +80,7 @@ struct atomsnap_gate {
 	void (*atomsnap_free_impl)(struct atomsnap_version *version);
 	_Atomic uint64_t control_block;
 	_Atomic uint64_t *extra_control_blocks;
-	int num_extra_blocks;
+	int num_extra_control_blocks;
 };
 
 /*
@@ -104,16 +104,16 @@ struct atomsnap_gate *atomsnap_init_gate(struct atomsnap_init_context *ctx)
 		return NULL;
 	}
 
-	gate->num_extra_blocks = ctx->num_extra_control_blocks;
+	gate->num_extra_control_blocks = ctx->num_extra_control_blocks;
 
-	if (gate->num_extra_blocks < 0) {
+	if (gate->num_extra_control_blocks < 0) {
 		free(gate);
 		fprintf(stderr, "atomsnap_init_gate: invalid num extra_blocks\n");
 		return NULL;
 	}
 
-	if (gate->num_extra_blocks > 0) {
-		gate->extra_control_blocks = calloc(gate->num_extra_blocks,
+	if (gate->num_extra_control_blocks > 0) {
+		gate->extra_control_blocks = calloc(gate->num_extra_control_blocks,
 			sizeof(_Atomic uint64_t));
 
 		if (gate->extra_control_blocks == NULL) {
