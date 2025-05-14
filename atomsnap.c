@@ -139,7 +139,7 @@ void atomsnap_destroy_gate(struct atomsnap_gate *gate)
 
 	if (gate->extra_control_blocks != NULL) {
 		for (int i = 1; i <= gate->num_extra_control_blocks; i++) {
-			atomsnap_exchange_version_slot(gate, 1, NULL);
+			atomsnap_exchange_version_slot(gate, i, NULL);
 		}
 
 		free(gate->extra_control_blocks);
