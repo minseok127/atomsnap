@@ -1,5 +1,3 @@
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/minseok127/atomsnap)
-
 # ATOMSNAP
 
 A library for managing a grace period.
