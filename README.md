@@ -422,7 +422,6 @@ The reader entry function is optimized to avoid hardware memory barriers (`MFENC
 1.  **Load Global Counter**: The function loads the current value of `rcu_gp.ctr`.
 2.  **Store to Local Counter**: It stores this value into the reader's `urcu_memb_reader.ctr`.
     * **Compiler Barrier Only**: Crucially, this operation uses `atomic_signal_fence(memory_order_cst)`. This prevents the *compiler* from reordering instructions across the lock, but allows the *CPU* to reorder memory accesses, preserving pipeline performance.
-3.  **Nesting**: If `urcu_memb_reader.ctr` is already non-zero, it increments a nesting counter and returns immediately.
 
 #### 3.3. Writer Side: `synchronize_rcu()`
 The writer must ensure that any reader potentially holding a reference to old data has finished. Since readers do not issue full memory barriers, the writer must enforce them externally.
@@ -437,7 +436,7 @@ The writer must ensure that any reader potentially holding a reference to old da
     * It waits for every reader's `urcu_memb_reader.ctr` to either be `0` (inactive) or match the current global phase (implying they saw the update).
 
 3.  **Phase Flip**:
-    * The writer atomically toggles the phase bit of `rcu_gp.ctr` (e.g., `0` -> `1`).
+    * The writer atomically toggles the phase bit of `rcu_gp.ctr` (e.g., rcu_gp_ctr += 1, `0` -> `1`).
 
 4.  **Force Memory Barrier (Post-Flip)**:
     * Another call to **`sys_membarrier()`** is made.
