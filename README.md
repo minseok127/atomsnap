@@ -501,7 +501,7 @@ Bits 63-32: Outer Reference Count (incremented by readers)
 Bits 31-0:  Version Handle (identifies current version)
 ```
 
-## Allocation Strategy
+## Allocation Strategy (atomsnap_version)
 
 1. **Local Free List**: Thread-local batch of freed slots (wait-free pop)
 2. **Arena Shared List**: Per-arena free list for cross-thread recycling
