@@ -460,7 +460,7 @@ Writers use conditional exchange with retry.
 | 8/8             | 8,882        | 528,600    | 2,639,648  | 1,344,667 | 61,349      |
 | 16/16           | 11           | 693,230    | 1,639,855  | 1,324,588 | 3,811       |
 
-## Benchmark 3: Unbalanced Workloads (16 bytes)
+## Benchmark 3: Unbalanced Workloads (CAS, 16 bytes)
 
 Tests extreme reader/writer ratios.
 
