@@ -101,7 +101,7 @@ Each gate maintains a 64-bit atomic control block:
 **Lifecycle**:
 1. Writer allocates version from thread-local arena
 2. Writer sets object and exchanges version atomically
-3. Readers increment outer reference count on acquire
+3. Readers increment outer reference count on acquire (control block)
 4. Writer decrements inner reference count on exchange (by outer count value)
 5. Readers increment inner reference count on release
 6. Version freed when inner reference count reaches zero
