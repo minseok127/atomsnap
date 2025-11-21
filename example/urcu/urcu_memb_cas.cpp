@@ -8,7 +8,7 @@
 #include <iomanip>
 #include <cstring>
 
-#include <urcu-qsbr.h>
+#include <urcu/urcu-memb.h>
 #include <urcu/uatomic.h>
 
 std::atomic<size_t> total_writer_ops{0};
@@ -23,7 +23,7 @@ struct Data {
 Data *global_ptr = nullptr;
 
 void writer(std::barrier<> &sync) {
-    rcu_register_thread();
+    rcu_register_thread_memb();
     sync.arrive_and_wait();
     
     auto start = std::chrono::steady_clock::now();
@@ -37,6 +37,7 @@ void writer(std::barrier<> &sync) {
         }
 
         Data *old_data = CMM_LOAD_SHARED(global_ptr);
+        
         Data *new_data = new Data;
         if (old_data) {
             new_data->value1 = old_data->value1 + 1;
@@ -46,23 +47,24 @@ void writer(std::barrier<> &sync) {
             new_data->value2 = 0;
         }
 
-        Data *reclaimed_data = (Data *)uatomic_xchg(&global_ptr, new_data);
-
-        synchronize_rcu();
-
-        if (reclaimed_data) {
-            delete reclaimed_data;
+        if (uatomic_cmpxchg(&global_ptr, old_data, new_data) == old_data) {
+            synchronize_rcu_memb();
+            
+            if (old_data) {
+                delete old_data;
+            }
+            ops++;
+        } else {
+            delete new_data;
         }
-
-        ops++;
     }
 
-    rcu_unregister_thread();
+    rcu_unregister_thread_memb();
     total_writer_ops.fetch_add(ops, std::memory_order_relaxed);
 }
 
 void reader(std::barrier<> &sync) {
-    rcu_register_thread();
+    rcu_register_thread_memb();
     sync.arrive_and_wait();
     
     auto start = std::chrono::steady_clock::now();
@@ -75,7 +77,7 @@ void reader(std::barrier<> &sync) {
             break;
         }
 
-        rcu_read_lock();
+        rcu_read_lock_memb();
 
         Data *current_data = rcu_dereference(global_ptr);
         if (current_data) {
@@ -86,14 +88,12 @@ void reader(std::barrier<> &sync) {
             }
         }
 
-        rcu_read_unlock();
-
-        rcu_quiescent_state();
+        rcu_read_unlock_memb();
 
         ops++;
     }
 
-    rcu_unregister_thread();
+    rcu_unregister_thread_memb();
     total_reader_ops.fetch_add(ops, std::memory_order_relaxed);
 }
 

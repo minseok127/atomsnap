@@ -1,22 +1,16 @@
 CXX      := g++
 CXXFLAGS := -std=c++20 -O2 -Wall -pthread
-LDLIBS   := -lurcu -lurcu-qsbr
+LDLIBS   := -lurcu-memb
 
-TARGETS  := urcu_mb_exchange urcu_mb_cas urcu_qsbr_exchange urcu_qsbr_cas
+TARGETS  := urcu_memb_exchange urcu_memb_cas
 
 all: $(TARGETS)
 
-urcu_mb_exchange: urcu_mb_exchange.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $< -lurcu
+urcu_memb_exchange: urcu_memb_exchange.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $< $(LDLIBS)
 
-urcu_mb_cas: urcu_mb_cas.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $< -lurcu
-
-urcu_qsbr_exchange: urcu_qsbr_exchange.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $< -lurcu-qsbr
-
-urcu_qsbr_cas: urcu_qsbr_cas.cpp
-	$(CXX) $(CXXFLAGS) -o $@ $< -lurcu-qsbr
+urcu_memb_cas: urcu_memb_cas.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $< $(LDLIBS)
 
 clean:
 	rm -f $(TARGETS)
