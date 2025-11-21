@@ -1,6 +1,6 @@
 # ATOMSNAP
 
-A wait-free versioned object management library for multi-threaded environments.
+A library for managing a grace period.
 
 ## Overview
 
