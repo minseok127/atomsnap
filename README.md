@@ -402,56 +402,6 @@ atomsnap_release_version(ver2);
 
 ---
 
-# Comparison with Userspace RCU (liburcu)
-
-To understand the performance results, it helps to look at how `liburcu` manages memory compared to `atomsnap`.
-
-### How `liburcu-memb` Works (Internal Mechanism)
-
-This section details the implementation of the `liburcu-memb` flavor, specifically focusing on how it leverages the Linux kernel's `sys_membarrier` to achieve low-overhead readers.
-
-#### 3.1. Global & Thread-Local State
-* **`rcu_gp.ctr` (Global Counter)**: A global atomic variable tracking the current grace period phase. The lower bits are used to store the current phase (0 or 1).
-* **`urcu_memb_reader.ctr` (Thread-Local Counter)**: Each registered reader thread maintains a thread-local storage (TLS) variable. This variable indicates the thread's current state:
-    * `0`: The thread is **inactive** (not in a critical section).
-    * `Value matching rcu_gp.ctr`: The thread is **active** and observing the current grace period.
-
-#### 3.2. Reader Side: `rcu_read_lock()`
-The reader entry function is optimized to avoid hardware memory barriers (`MFENCE` or `LOCK` instructions) on the fast path.
-
-1.  **Load Global Counter**: The function loads the current value of `rcu_gp.ctr`.
-2.  **Store to Local Counter**: It stores this value into the reader's `urcu_memb_reader.ctr`.
-    * **Compiler Barrier Only**: Crucially, this operation uses `atomic_signal_fence(memory_order_cst)`. This prevents the *compiler* from reordering instructions across the lock, but allows the *CPU* to reorder memory accesses, preserving pipeline performance.
-
-#### 3.3. Writer Side: `synchronize_rcu()`
-The writer must ensure that any reader potentially holding a reference to old data has finished. Since readers do not issue full memory barriers, the writer must enforce them externally.
-
-1.  **Force Memory Barrier (Pre-Flip)**:
-    * The writer calls **`sys_membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED)`**.
-    * **Kernel Action**: The kernel sends Inter-Processor Interrupts (IPIs) to all CPUs running threads of the process. This forces a hardware memory barrier on those CPUs.
-    * **Guarantee**: This ensures that any prior memory accesses by readers (specifically, setting their `urcu_memb_reader.ctr`) are visible to the writer.
-
-2.  **Wait for Current Phase**:
-    * The writer iterates over all registered readers.
-    * It waits for every reader's `urcu_memb_reader.ctr` to either be `0` (inactive) or match the current global phase (implying they saw the update).
-
-3.  **Phase Flip**:
-    * The writer atomically toggles the phase bit of `rcu_gp.ctr` (e.g., rcu_gp_ctr += 1, `0` -> `1`).
-
-4.  **Force Memory Barrier (Post-Flip)**:
-    * Another call to **`sys_membarrier()`** is made.
-    * This ensures that the new `rcu_gp.ctr` value is visible to all readers before the writer proceeds.
-
-5.  **Wait for Old Phase**:
-    * The writer scans the readers again.
-    * It blocks until no reader is observed holding the *old* phase value. If a reader still has the old phase, the writer waits until that reader exits its critical section (setting `ctr` to 0) or updates to the new phase.
-
-#### 3.4. Performance Implications
-* **Readers**: Execute strictly local `LOAD` and `STORE` operations with no atomic RMW (Read-Modify-Write) instructions. Performance is close to a raw variable access.
-* **Writers**: Incur the overhead of two `sys_membarrier` system calls and potential blocking waits. This makes `liburcu-memb` write-heavy operations significantly slower than `atomsnap`, which uses non-blocking atomic exchanges.
-
----
-
 # Performance Comparison
 
 ## Environment
