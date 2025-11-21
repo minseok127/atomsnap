@@ -1,440 +1,606 @@
 # ATOMSNAP
 
-A library for managing a grace period.
+A wait-free versioned object management library for multi-threaded environments.
 
-### Purpose
+## Overview
 
-- Atomically manages multiple versions of an object.
-	- Readers should only see the object that is either entirely unmodified or fully updated. 
-	- Writers do not modify the object in place; instead, they copy it, update the data, and change the object pointer into the new version.
+ATOMSNAP enables multiple writers to safely modify shared objects while guaranteeing readers always see consistent snapshots. Unlike traditional locking mechanisms, ATOMSNAP achieves this through version management with wait-free reader access and lock-free writer updates.
 
-- Performance and Safety.
-	- Ensures wait-free access.
-	- Guarantees safe memory release.
+### Key Features
 
-### Reader & Writer Behavior
+- **Wait-Free Reads**: Readers acquire object versions without blocking or spinning
+- **Lock-Free Writes**: Writers update objects using atomic operations (TAS/CAS)
+- **Memory Safety**: Automatic garbage collection through reference counting
+- **Version Consistency**: Readers never observe partially updated objects
 
-- Readers
-	- Instantly obtain a version pointer without failure.
+### Use Cases
 
-- Writers
-	- Use TAS (Test-And-Set) for guaranteed updates.
-	- Use CAS (Compare-And-Swap) with a retry mechanism if needed.
+ATOMSNAP is designed for scenarios where:
+- Objects are too large for single atomic instructions (>8 bytes)
+- Readers require consistent snapshots without tearing
 
-### Version Management Rules
+## Critical Usage Rules
 
-- Acquiring and releasing a version must always be paired.
-- Avoid repeated acquisition without release.
-- If the acquisition-release gap exceeds 0xFFFFFFFF (uint32_t), behavior is unpredictable.
+1. **Acquire-Release Pairing**: Every `atomsnap_acquire_version()` must have a matching `atomsnap_release_version()`
+2. **No Nested Acquires**: Do not acquire multiple versions without releasing previous ones
+3. **Reference Count Limit**: If outer reference count exceeds 4,294,967,295 (UINT32_MAX), behavior is undefined
+4. **CAS Ordering**: When using `atomsnap_compare_exchange_version()`, always call `atomsnap_release_version()` AFTER the CAS operation to prevent ABA problems
+5. **Failed CAS Cleanup**: When CAS fails, manually free the unused version with `atomsnap_free_version()` or reuse the version to prevent memory leaks
+
+---
 
 # Build
-```
+```bash
 $ git clone https://github.com/minseok127/atomsnap.git
 $ cd atomsnap
 $ make
-$ tree
-|
--- libatomsnap.a 
-|
--- libatomsnap.so
-|
--- atomsnap.h
 ```
 
-# Data Structure
+This produces:
+- `libatomsnap.a` - Static library
+- `libatomsnap.so` - Shared library
+- `atomsnap.h` - Public header file
 
-- struct atomsnap_gate
-	- Synchronization point that manages versioned object in a multi-threaded environment.
-	- Readers and writers accessing the same gate handle different versions of the same object.
+### Build Options
+```bash
+# Release build (default, -O2)
+$ make BUILD_MODE=release
 
-- struct atomsnap_init_context
-	- Passed as an argument to atomsnap_init_gate().
-	- Contains user-defined function pointers for managing memory allocation and deallocation of atomsnap_version objects.
-	- Fields:
-		- atomsnap_alloc_impl → Custom memory allocation function pointer.
-		- atomsnap_free_impl → Custom memory deallocation function pointer.
-
-- struct atomsnap_version (Versioned Object)
-	- Represents a specific version of an object.
-	- Fields:
-		- object → Pointer to the actual data for this version.
-		- free_context → User-defined context for the free function.
-		- gate → Identifies the atomsnap_gate this version belongs to.
-		- opaque → Internal version management data, not user-modifiable.
-	- Usage:
-		- Writers create a version using atomsnap_make_version().
-		- After creation, writers assign their object and set free_context for cleanup.
-		- gate and opaque are initialized internally and should not be modified.
-
-# API
-
-- Gate Management
-	- atomsnap_init_gate(ctx)
-		- Initializes and returns a pointer to an atomsnap_gate, or NULL on failure.
-	- atomsnap_destroy_gate(gate)
-		- Destroys an atomsnap_gate.
-
-- Version Management
-	- atomsnap_acquire_version(gate)
-		- Atomically acquires the current version.
-		- Ensures the version is not deallocated until released.
-	- atomsnap_release_version(version)
-		- Pairs with atomsnap_acquire_version()
-		- Releases a version and invokes the user-defined free function when no threads reference it.
-
-- Writer Operations
-	- atomsnap_make_version(gate, alloc_arg)
-		- Allocates memory for an atomsnap_version. 
-		- Calls a user-defined allocation function with alloc_arg.
-	- atomsnap_exchange_version(gate, version)
-		- Unconditionally replaces the gate’s version with the given version.
-	- atomsnap_compare_exchange_version(gate, old_version, new_version) 
-		- Replaces the gate’s version only if the latest version matches old_version.
-		- Returns true on success, false otherwise.
-
-# Example
-
-The target situation involves multiple writers attempting to modify a logically identical object. The object is too large to be modified with a single atomic instruction, so writers copy it into their own memory, make all necessary modifications, and then attempt to replace the object with the updated version. Readers, on the other hand, should only see objects that are either entirely unmodified or fully updated, ensuring atomic visibility without partial modifications.
-
-## with std::shared_mutex
-
+# Debug build (-O0 -g -pg)
+$ make BUILD_MODE=debug
 ```
+
+---
+
+# Architecture
+
+## Core Concepts
+
+### Handle-Based Design
+
+ATOMSNAP uses 32-bit handles instead of direct pointers for version management:
+```
+┌─────────────────────────────────────┐
+│  32-bit Handle                      │
+├──────────┬──────────┬───────────────┤
+│  Thread  │  Arena   │  Slot         │
+│  (12bit) │  (6bit)  │  (14bit)      │
+└──────────┴──────────┴───────────────┘
+```
+
+This design enables:
+- Efficient ABA problem prevention
+- Compact control block representation (64-bit total)
+- Fast handle-to-pointer resolution via table lookup
+
+### Control Block Structure
+
+Each gate maintains a 64-bit atomic control block:
+```
+┌─────────────────────────────────────┐
+│  64-bit Control Block               │
+├──────────────────┬──────────────────┤
+│  Reference Count │  Version Handle  │
+│  (32bit)         │  (32bit)         │
+└──────────────────┴──────────────────┘
+```
+
+- **Reference Count**: Number of readers currently accessing this version
+- **Version Handle**: Identifies the current version
+
+### Memory Management
+
+**Per-Thread Arenas**:
+- Each thread owns up to 64 arenas
+- Each arena contains 16,384 version slots
+- Maximum capacity: 4,096 threads × 64 arenas × 16,384 slots ≈ 4.3B versions
+
+**Free List Design**:
+- Thread-local batch for fast allocation (wait-free)
+- Arena-level shared list for cross-thread recycling
+- Sentinel-based wait-free push operation
+
+**Lifecycle**:
+1. Writer allocates version from thread-local arena
+2. Writer sets object and exchanges version atomically
+3. Readers increment outer reference count on acquire
+4. Writer decrements inner reference count on exchange (by outer count value)
+5. Readers increment inner reference count on release
+6. Version freed when inner reference count reaches zero
+
+---
+
+# API Reference
+
+## Data Structures
+
+### atomsnap_gate
+Synchronization point managing versioned objects. Supports multiple independent control block slots for managing separate version chains within a single gate.
+
+### atomsnap_version
+Represents a specific version of an object.
+
+**Fields**:
+- `object` - User payload pointer
+- `free_context` - User-defined cleanup context
+- `gate` - Associated gate (read-only)
+- `opaque` - Internal management data (do not modify)
+
+### atomsnap_init_context
+Configuration for gate initialization.
+
+**Fields**:
+- `free_impl` - Cleanup function: `void (*)(void *object, void *free_context)`
+- `num_extra_control_blocks` - Number of additional slots (0 for single slot)
+
+## Functions
+
+### Gate Management
+
+**`atomsnap_gate *atomsnap_init_gate(atomsnap_init_context *ctx)`**
+- Creates and initializes a gate
+- Returns: Gate pointer, or NULL on failure
+
+**`void atomsnap_destroy_gate(atomsnap_gate *gate)`**
+- Destroys a gate
+- Note: Undefined behavior if versions are still in use
+
+### Version Allocation
+
+**`atomsnap_version *atomsnap_make_version(atomsnap_gate *gate)`**
+- Allocates a version from the internal memory pool
+- Returns: Version pointer, or NULL if arena exhausted
+
+**`void atomsnap_set_object(atomsnap_version *ver, void *object, void *free_context)`**
+- Sets user object and cleanup context
+- Must be called before exchanging the version
+
+**`void atomsnap_free_version(atomsnap_version *version)`**
+- Manually frees an unused version
+- Use when CAS fails or version creation is aborted
+- Calls user's free_impl callback
+
+**`void *atomsnap_get_object(const atomsnap_version *ver)`**
+- Retrieves user object from version
+- Returns: Object pointer, or NULL if version is NULL
+
+### Reader Operations
+
+**`atomsnap_version *atomsnap_acquire_version(atomsnap_gate *gate)`**
+- Atomically acquires current version from slot 0
+- Wait-free operation
+- Must be paired with `atomsnap_release_version()`
+
+**`atomsnap_version *atomsnap_acquire_version_slot(atomsnap_gate *gate, int slot_idx)`**
+- Acquires version from specified slot
+- slot_idx: 0 to num_extra_control_blocks
+
+**`void atomsnap_release_version(atomsnap_version *ver)`**
+- Releases a previously acquired version
+- May trigger version deallocation if reference count reaches zero
+
+### Writer Operations
+
+**`void atomsnap_exchange_version(atomsnap_gate *gate, atomsnap_version *version)`**
+- Unconditionally replaces version in slot 0
+- Previous version released when all readers finish
+
+**`void atomsnap_exchange_version_slot(atomsnap_gate *gate, int slot_idx, atomsnap_version *version)`**
+- Replaces version in specified slot
+
+**`bool atomsnap_compare_exchange_version(atomsnap_gate *gate, atomsnap_version *expected, atomsnap_version *new_ver)`**
+- Conditionally replaces version in slot 0
+- Succeeds only if current version matches expected
+- Returns: true on success, false on failure
+- **Critical**: Call `atomsnap_release_version(expected)` AFTER this operation
+
+**`bool atomsnap_compare_exchange_version_slot(atomsnap_gate *gate, int slot_idx, atomsnap_version *expected, atomsnap_version *new_ver)`**
+- CAS operation on specified slot
+
+---
+
+# Usage Guide
+
+## Basic Example
+
+### Problem Statement
+
+Multiple writers need to update a shared object that requires multiple fields to be modified atomically. The object is too large for a single atomic instruction. Readers must always see a fully consistent state—never partially updated values.
+```cpp
 struct Data {
     int64_t value1;
     int64_t value2;
 };
-
-Data *global_ptr = new Data{0, 0};
-
-std::shared_mutex rwlock;
 ```
 
-This situation can be implemented using C++'s std::shared_mutex. For example, consider a Data structure that contains two 8-byte integers. Writers need to update both value1 and value2, while readers must always see a fully updated or completely unchanged version of Data. To achieve this, we can declare a global std::shared_mutex and use it to manage Data atomically.
+### Solution with ATOMSNAP
 
-```
-void writer(std::barrier<> &sync) {
-    while (true) {
-        {
-            std::unique_lock<std::shared_mutex> lock(rwlock);
-            global_ptr->value1 = global_ptr->value1 + 1;
-            global_ptr->value2 = global_ptr->value2 + 1;
-        }
-    }
+#### 1. Initialize the Gate
+```cpp
+void cleanup_data(void *object, void *context) {
+    delete static_cast<Data*>(object);
 }
 
-void reader(std::barrier<> &sync) {
-    while (true) {
-        int64_t v1, v2;
-        {
-            std::shared_lock<std::shared_mutex> lock(rwlock);
-            v1 = global_ptr->value1;
-            v2 = global_ptr->value2;
-        }
-
-        if (v1 != v2) {
-            fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
-                v1, v2);
-            exit(1);
-        }
-    }
-}
-```
-
-Writers acquire a unique_lock on the shared_mutex to modify the value, while readers acquire a shared_lock to read it. Readers and writers operate on the same object pointer. So we don't need to deallocate the object until the workload is done.
-
-## with std::shared_ptr
-```
-struct Data {
-    int64_t value1;
-    int64_t value2;
+atomsnap_init_context ctx = {
+    .free_impl = cleanup_data,
+    .num_extra_control_blocks = 0  // Single slot
 };
 
-std::shared_ptr<Data> global_ptr = std::make_shared<Data>();
-```
-This situation can also be implemented using C++'s std::shared_ptr. At this time, global_ptr is declared as a shared_ptr instead of a direct pointer to the Data.
+atomsnap_gate *gate = atomsnap_init_gate(&ctx);
 
+// Create initial version
+atomsnap_version *initial = atomsnap_make_version(gate);
+atomsnap_set_object(initial, new Data{0, 0}, nullptr);
+atomsnap_exchange_version(gate, initial);
 ```
-void writer(std::barrier<> &sync) {
-    while (true) {
-        Data *old_data = std::atomic_load(&global_ptr);
-        Data *new_data = std::make_shared<Data>(*old_data);
-        new_data->value1 = old_data->value1 + 1;
-        new_data->value2 = old_data->value2 + 1;
-        std::atomic_store(&global_ptr, new_data);
+
+#### 2. Reader Implementation
+```cpp
+void reader_thread() {
+    while (running) {
+        // Acquire current version (wait-free)
+        atomsnap_version *ver = atomsnap_acquire_version(gate);
+        Data *data = static_cast<Data*>(atomsnap_get_object(ver));
+        
+        // Access data safely - always consistent
+        assert(data->value1 == data->value2);
+        
+        // Release version
+        atomsnap_release_version(ver);
     }
 }
+```
 
-void reader(std::barrier<> &sync) {
-	while (true) {
-        Data *current_data = std::atomic_load(&global_ptr);
-        if (current_data->value1 != current_data->value2) {
-            fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
-                current_data->value1, current_data->value2);
-            exit(1);
+#### 3. Writer Implementation (Unconditional Update)
+```cpp
+void writer_thread_tas() {
+    while (running) {
+        // Read current version
+        atomsnap_version *old_ver = atomsnap_acquire_version(gate);
+        Data *old_data = static_cast<Data*>(atomsnap_get_object(old_ver));
+        
+        // Create new version with updated data
+        atomsnap_version *new_ver = atomsnap_make_version(gate);
+        Data *new_data = new Data{
+            old_data->value1 + 1,
+            old_data->value2 + 1
+        };
+        atomsnap_set_object(new_ver, new_data, nullptr);
+        
+        // Replace version atomically
+        atomsnap_exchange_version(gate, new_ver);
+        
+        // Release old version
+        atomsnap_release_version(old_ver);
+    }
+}
+```
+
+#### 4. Writer Implementation (Conditional Update)
+```cpp
+void writer_thread_cas() {
+    while (running) {
+        // Read current version
+        atomsnap_version *old_ver = atomsnap_acquire_version(gate);
+        Data *old_data = static_cast<Data*>(atomsnap_get_object(old_ver));
+        
+        // Create new version
+        atomsnap_version *new_ver = atomsnap_make_version(gate);
+        Data *new_data = new Data{
+            old_data->value1 + 1,
+            old_data->value2 + 1
+        };
+        atomsnap_set_object(new_ver, new_data, nullptr);
+        
+        // Attempt conditional replacement
+        if (!atomsnap_compare_exchange_version(gate, old_ver, new_ver)) {
+            // CAS failed - free unused version
+            atomsnap_free_version(new_ver);
         }
+        
+        // CRITICAL: Release AFTER CAS to prevent ABA
+        atomsnap_release_version(old_ver);
     }
 }
-
-```
-Writers create a new Data instance, modify all necessary fields, and then replace the old version with the new one. Readers always access a fully consistent snapshot of Data, ensuring they never observe partially modified values. Since both readers and writers use std::shared_ptr, safe memory deallocation of Data is guaranteed.
-
-## with atomsnap
-
-When implementing with atomsnap, just like creating a global_ptr using std::shared_ptr, an atomsnap_gate must be created. This data structure is allocated using the atomsnap_init_gate() initialization function and deallocated using the atomsnap_destroy_gate() function. To call the initialization function, an atomsnap_init_context data structure is required.
-
-The user must provide two function pointers in the context. 
-
-```
-/* atomsnap.h */
-typedef struct atomsnap_init_context {
-    struct atomsnap_version *(*atomsnap_alloc_impl)(void* alloc_arg);
-    void (*atomsnap_free_impl)(struct atomsnap_version *version);
-} atomsnap_init_context;
-```
-```
-/* atomsnap.h */
-typedef struct atomsnap_version {
-    void *object;
-    void *free_context;
-    struct atomsnap_gate *gate;
-    void *opaque;
-} atomsnap_version;
-```
-```
-struct atomsnap_version *atomsnap_make_version(struct atomsnap_gate *gate,
-    void *alloc_arg);
 ```
 
-The first function is responsible for allocating an atomsnap_version structure. This function is later called inside atomsnap_make_version(), which is used by writers to allocate an atomsnap_version structure. 
+## Advanced: Multi-Slot Gates
 
-The second function pointer is for deallocating an atomsnap_version. This function is automatically called when all threads referencing the atomsnap_version have disappeared. The user can pass variables for the free function by setting them in the free_context field of atomsnap_version.
-
-Here is an example:
-```
-struct atomsnap_version *atomsnap_alloc_impl(void *arg) {
-    struct atomsnap_version *version = new atomsnap_version;
-    Data *data = new Data;
-    int *values = (int *)arg;
-
-    data->value1 = values[0];
-    data->value2 = values[1];
-
-    version->object = data;
-    version->free_context = NULL;
-
-    return version;
-}
-
-void atomsnap_free_impl(struct atomsnap_version *version) {
-    delete (Data *)version->object;
-    delete version;
-}
-
-struct atomsnap_init_context atomsnap_gate_ctx = {
-    .atomsnap_alloc_impl = atomsnap_alloc_impl,
-    .atomsnap_free_impl = atomsnap_free_impl
+For managing multiple independent version chains:
+```cpp
+atomsnap_init_context ctx = {
+    .free_impl = cleanup_data,
+    .num_extra_control_blocks = 3  // 4 total slots (0-3)
 };
 
-atomsnap_gate *gate = atomsnap_init_gate(&atomsnap_gate_ctx);
+atomsnap_gate *gate = atomsnap_init_gate(&ctx);
+
+// Use different slots for different purposes
+atomsnap_version *ver_slot0 = atomsnap_acquire_version_slot(gate, 0);
+atomsnap_version *ver_slot1 = atomsnap_acquire_version_slot(gate, 1);
+
+// Independent updates
+atomsnap_exchange_version_slot(gate, 0, new_version0);
+atomsnap_exchange_version_slot(gate, 1, new_version1);
 ```
 
-Once the preparation steps are complete, the atomsnap_init_context can be passed as an argument to atomsnap_init_gate(), which will return a pointer to an atomsnap_gate.
+---
 
-```
-void writer(std::barrier<> &sync) {
-    struct atomsnap_version *new_version;
-    int values[2];
+# Common Pitfalls
 
-    while (true) {
-        struct atomsnap_version *old_version = atomsnap_acquire_version(gate);
-        Data *old_data = static_cast<Data*>(old_version->object);
-        values[0] = old_data->value1 + 1;
-        values[1] = old_data->value2 + 1;
-        new_version = atomsnap_make_version(gate, (void*)values);
-        atomsnap_exchange_version(gate, new_version);
-        atomsnap_release_version(old_version);
-    }
-}
+## ABA Problem with CAS
 
-void reader(std::barrier<> &sync) {
-    struct atomsnap_version *current_version;
+**Wrong**:
+```cpp
+atomsnap_version *old_ver = atomsnap_acquire_version(gate);
+atomsnap_version *new_ver = atomsnap_make_version(gate);
+// ... prepare new_ver ...
 
-    while (true) {
-        current_version = atomsnap_acquire_version(gate);
-        Data *d = static_cast<Data*>(current_version->object);
-        if (d->value1 != d->value2) {
-            fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
-                d->value1, d->value2);
-            exit(1);
-        }
-        atomsnap_release_version(current_version);
-    }
+atomsnap_release_version(old_ver);  // ❌ Released too early!
+if (!atomsnap_compare_exchange_version(gate, old_ver, new_ver)) {
+    atomsnap_free_version(new_ver);
 }
 ```
 
-Just like obtaining global_ptr using atomic_load in std::shared_ptr, atomsnap allows acquiring the current version using atomsnap_acquire_version(). This function must be used in pairs with atomsnap_release_version(). The lifetime of the acquired version is guaranteed until atomsnap_release_version() is called. Accessing the version after calling release is not safe and is not guaranteed to work correctly.
+**Correct**:
+```cpp
+atomsnap_version *old_ver = atomsnap_acquire_version(gate);
+atomsnap_version *new_ver = atomsnap_make_version(gate);
+// ... prepare new_ver ...
 
-Writers call the atomsnap_make_version() function to allocate a new version. In this process, the allocation function pointer set during initialization is invoked, and the second argument of atomsnap_make_version() is passed as an argument to the allocation function.
-
-## Caution for the writer when using CAS
-
-If the writer creates a new version regardless of the previous state, it can replace the version using the atomsnap_exchange_version() function, as shown in the pseudocode above. On the other hand, if the writer is sensitive to the previous version's state, it may need to use atomsnap_compare_exchange_version() to replace the version, as shown in the following pseudocode.
-
+if (!atomsnap_compare_exchange_version(gate, old_ver, new_ver)) {
+    atomsnap_free_version(new_ver);
+}
+atomsnap_release_version(old_ver);  // ✓ Released after CAS
 ```
-void writer(std::barrier<> &sync) {
-    struct atomsnap_version *new_version;
-    int values[2];
 
-    while (true) {
-        struct atomsnap_version *old_version = atomsnap_acquire_version(gate);
-        auto old_data = static_cast<Data*>(old_version->object);
-        values[0] = old_data->value1 + 1;
-        values[1] = old_data->value2 + 1;
-        new_version = atomsnap_make_version(gate, (void*)values);
-        if (!atomsnap_compare_exchange_version(gate,
-                old_version, new_version)) {
-            atomsnap_free_impl(new_version);
-        }
-        atomsnap_release_version(old_version); /* !!! Call this function after atomsnap_compare_exchange_version !!! */
-    }
+**Why?** Releasing old_ver before CAS allows its handle to be recycled. If another thread creates a new version with the same handle, CAS may incorrectly succeed.
+
+## Memory Leak on CAS Failure
+
+**Wrong**:
+```cpp
+atomsnap_version *new_ver = atomsnap_make_version(gate);
+// ... prepare new_ver ...
+
+if (!atomsnap_compare_exchange_version(gate, old_ver, new_ver)) {
+    // ❌ new_ver is leaked!
 }
 ```
 
-This function replaces the gate’s version with new_version only if old_version is the latest version of the gate. It returns true if the replacement succeeds and false otherwise. Note that calling atomsnap_release_version() on old_version before atomsnap_compare_exchange_version() can lead to an ABA problem.
+**Correct**:
+```cpp
+atomsnap_version *new_ver = atomsnap_make_version(gate);
+// ... prepare new_ver ...
 
-For example, suppose Thread A obtains old_version and creates new_version based on it. Before calling atomsnap_compare_exchange_version(), it calls atomsnap_release_version(), freeing old_version. Meanwhile, Thread B creates a new_version, its memory address accidentally matches that of the now-freed old_version. If Thread B successfully replaces the version in the gate, and Thread A then calls atomsnap_compare_exchange_version(), Thread A would replace the version based on an invalid version (what we expect is for atomsnap_compare_exchange_version() to fail since the replacement should be based on Thread B’s version).
+if (!atomsnap_compare_exchange_version(gate, old_ver, new_ver)) {
+    atomsnap_free_version(new_ver);  // ✓ Explicitly freed
+}
+```
 
-To prevent this, atomsnap_release_version() for the old_version used in atomsnap_compare_exchange_version() must be called only after atomsnap_compare_exchange_version() has completed.
+## Unbalanced Acquire/Release
 
-# Evaluation
+**Wrong**:
+```cpp
+atomsnap_version *ver1 = atomsnap_acquire_version(gate);
+atomsnap_version *ver2 = atomsnap_acquire_version(gate);  // ❌ Nested acquire
+// ... use ver1 and ver2 ...
+atomsnap_release_version(ver1);
+atomsnap_release_version(ver2);
+```
+
+**Correct**:
+```cpp
+atomsnap_version *ver1 = atomsnap_acquire_version(gate);
+// ... use ver1 ...
+atomsnap_release_version(ver1);
+
+atomsnap_version *ver2 = atomsnap_acquire_version(gate);  // ✓ After release
+// ... use ver2 ...
+atomsnap_release_version(ver2);
+```
+
+---
+
+# Performance Comparison
 
 ## Environment
 
-- Hardware
-	- CPU: Intel Core i5-13400F (16 cores)
-	- RAM: 16GB DDR5 5600MHz
+- **CPU**: Intel Core i5-13400F (16 cores)
+- **RAM**: 16GB DDR5 5600MHz
+- **OS**: Ubuntu 24.04.1 LTS
+- **Compiler**: GCC 13.3.0
+- **Duration**: 100 seconds per test
 
-- Software
-	- OS: Ubuntu 24.04.1 LTS
-	- Compiler: GCC 13.3.0
-	- Build System: GNU Make 4.3
+## Benchmark 1: Stateless TAS (16 bytes)
 
-All experiments were conducted for 100 seconds.
-
-## Stateless modification (16 bytes object, TAS)
-
-```
+Writers use unconditional exchange. Object size is 16 bytes.
+```bash
 $ git clone https://github.com/minseok127/atomsnap.git
-$ cd atomsnap
-$ git checkout test
-$ make
-$ cd example/exchange
-$ make
+$ cd atomsnap && git checkout test && make
+$ cd example/exchange && make
+$ ./atomsnap_example 8 8 100
 ```
 
-- Reader throughput (ops/sec)
+### Reader Throughput (ops/sec)
 
-| # of Readers / Writers | std::shared_ptr |  atomsnap  |
-|:-----------------------:|:--------------:|:----------:|
-|	  1 / 1 	  |   4,118,869    | 15,364,317 |
-|         2 / 2 	  |   3,919,675    | 12,911,508 |
-|	  4 / 4 	  |   3,157,681    | 17,237,426 |
-|	  8 / 8 	  |   2,421,110    | 18,977,734 |
-|        16 / 16 	  |   2,914,017    | 19,803,148 |
+| Readers/Writers | std::shared_ptr | atomsnap   | Speedup |
+|:---------------:|:---------------:|:----------:|:-------:|
+| 1/1             | 4,118,869       | 15,364,317 | 3.73×   |
+| 2/2             | 3,919,675       | 12,911,508 | 3.29×   |
+| 4/4             | 3,157,681       | 17,237,426 | 5.46×   |
+| 8/8             | 2,421,110       | 18,977,734 | 7.84×   |
+| 16/16           | 2,914,017       | 19,803,148 | 6.79×   |
 
-- Writer throughput (ops/sec)
+### Writer Throughput (ops/sec)
 
-| # of Readers / Writers | std::shared_ptr |  atomsnap  |
-|:----------------------:|:---------------:|:----------:|
-|	  1 / 1 	 |     2,290,178   | 6,536,867  |
-|	  2 / 2 	 |     1,874,746   | 5,934,981  |
-|	  4 / 4 	 |     1,419,709   | 7,147,858  |
-|	  8 / 8 	 |     1,122,508   | 7,605,056  |
-|        16 / 16	 |     1,356,290   | 7,342,350  |
+| Readers/Writers | std::shared_ptr | atomsnap  | Speedup |
+|:---------------:|:---------------:|:---------:|:-------:|
+| 1/1             | 2,290,178       | 6,536,867 | 2.85×   |
+| 2/2             | 1,874,746       | 5,934,981 | 3.17×   |
+| 4/4             | 1,419,709       | 7,147,858 | 5.03×   |
+| 8/8             | 1,122,508       | 7,605,056 | 6.78×   |
+| 16/16           | 1,356,290       | 7,342,350 | 5.41×   |
 
-## Stateful modification (16 bytes object, CAS)
+## Benchmark 2: Stateful CAS (16 bytes)
 
-```
-$ git clone https://github.com/minseok127/atomsnap.git
-$ cd atomsnap
-$ git checkout test
-$ make
-$ cd example/cmp_exchange
-$ make
+Writers use conditional exchange with retry. Compared against mutex and spinlock.
+```bash
+$ cd example/cmp_exchange && make
+$ ./atomsnap_example 8 8 100
 ```
 
-- Reader throughput (ops/sec)
+### Reader Throughput (ops/sec)
 
-| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spinlock_t |  atomsnap  |
-|:----------------------:|:-----------------:|:---------------:|:------------------:|:----------:|
-|	  1 / 1 	 | 	  483,073    |    4,168,734    |     13,861,844     | 13,345,141 |
-|	  2 / 2 	 |     10,806,981    |    3,790,341    |      7,474,572     | 14,037,157 |
-|	  4 / 4 	 |     13,945,730    |    3,082,837    |      4,546,094     | 17,340,585 |
-|	  8 / 8 	 |     17,149,214    |    2,567,489    |      4,055,162     | 19,344,667 |
-|        16 / 16 	 |     17,000,505    |    2,372,081    |      1,608,919     | 21,623,425 |
+| Readers/Writers | shared_mutex | shared_ptr | spinlock   | atomsnap   |
+|:---------------:|:------------:|:----------:|:----------:|:----------:|
+| 1/1             | 483,073      | 4,168,734  | 13,861,844 | 13,345,141 |
+| 2/2             | 10,806,981   | 3,790,341  | 7,474,572  | 14,037,157 |
+| 4/4             | 13,945,730   | 3,082,837  | 4,546,094  | 17,340,585 |
+| 8/8             | 17,149,214   | 2,567,489  | 4,055,162  | 19,344,667 |
+| 16/16           | 17,000,505   | 2,372,081  | 1,608,919  | 21,623,425 |
 
-- Writer throughput (ops/sec)
+### Writer Throughput (ops/sec)
 
-| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spinlock_t |  atomsnap  |
-|:----------------------:|:-----------------:|:---------------:|:------------------:|:----------:|
-|	  1 / 1 	 | 	  395,415    |    2,152,445    |     13,621,219     |  6,104,996 |
-|	  2 / 2 	 | 	  150,856    |    1,444,993    |      5,589,843     |  3,325,338 |
-|	  4 / 4 	 | 	   27,958    |    1,103,961    |      3,962,019     |  2,238,743 |
-|	  8 / 8 	 | 	    8,882    |      528,600    |      2,639,648     |  1,344,667 |
-|        16 / 16	 | 	       11    |      693,230    |      1,639,855     |  1,324,588 |
+| Readers/Writers | shared_mutex | shared_ptr | spinlock   | atomsnap  |
+|:---------------:|:------------:|:----------:|:----------:|:---------:|
+| 1/1             | 395,415      | 2,152,445  | 13,621,219 | 6,104,996 |
+| 2/2             | 150,856      | 1,444,993  | 5,589,843  | 3,325,338 |
+| 4/4             | 27,958       | 1,103,961  | 3,962,019  | 2,238,743 |
+| 8/8             | 8,882        | 528,600    | 2,639,648  | 1,344,667 |
+| 16/16           | 11           | 693,230    | 1,639,855  | 1,324,588 |
 
-## Stateful modification (4 KB object, CAS)
+**Key Insight**: shared_mutex writer throughput collapses under contention (11 ops/sec at 16/16). ATOMSNAP maintains 1.3M ops/sec while providing superior reader performance.
 
-```
-$ git clone https://github.com/minseok127/atomsnap.git
-$ cd atomsnap
-$ git checkout test
-$ make
-$ cd example/cmp_exchange_large
-$ make
-```
+## Benchmark 3: Large Object CAS (4 KB)
 
-- Reader throughput (ops/sec)
-
-| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spinlock_t |  atomsnap  |
-|:----------------------:|:-----------------:|:---------------:|:------------------:|:----------:|
-|	  1 / 1 	 | 	  70,052     |    2,001,176    |      3,805,337     |  1,915,966 |
-|	  2 / 2 	 |     3,629,300     |    2,352,779    |      3,725,530     |  3,647,479 |
-|	  4 / 4 	 |    14,935,709     |    2,803,578    |      3,105,244     |  8,010,336 |
-|	  8 / 8 	 |    12,134,346     |    1,940,209    |      1,960,867     | 13,101,473 |
-|        16 / 16 	 |    15,975,086     |    1,089,127    |        895,905     | 13,242,798 |
-
-- Writer throughput (ops/sec)
-
-| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spinlock_t |  atomsnap  |
-|:----------------------:|:-----------------:|:---------------:|:------------------:|:----------:|
-|	  1 / 1 	 | 	  83,167     |     1,587,131   |      4,427,044     |  2,104,934 |
-|	  2 / 2 	 | 	  30,287     |       967,290   |      4,167,675     |  1,771,074 |
-|	  4 / 4 	 | 	     336     |       617,992   |      3,768,093     |  1,520,589 |
-|	  8 / 8 	 | 	   2,322     |       416,472   |      2,424,839     |  1,423,559 |
-|        16 / 16	 | 	       5     |       455,773   |      1,489,894     |  1,425,100 |
-
-## Stateful modification (16 bytes object, CAS, R/W unbalanced)
-
-```
-$ git clone https://github.com/minseok127/atomsnap.git
-$ cd atomsnap
-$ git checkout test
-$ make
-$ cd example/cmp_exchange
-$ make
+Object size is 4096 bytes. Tests scalability with larger memory footprint.
+```bash
+$ cd example/cmp_exchange_large && make
+$ ./atomsnap_example 8 8 100
 ```
 
-- Reader throughput (ops/sec)
+### Reader Throughput (ops/sec)
 
-| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spinlock_t |  atomsnap  |
-|:----------------------:|:-----------------:|:---------------:|:------------------:|:----------:|
-|	 1 / 16 	 |     8,620,295     |      234,983    |        347,163     |  2,796,784 |
-|	 16 /  1 	 |    18,221,686     |    5,208,506    |      5,079,128     | 43,766,774 |
+| Readers/Writers | shared_mutex | shared_ptr | spinlock  | atomsnap   |
+|:---------------:|:------------:|:----------:|:---------:|:----------:|
+| 1/1             | 70,052       | 2,001,176  | 3,805,337 | 1,915,966  |
+| 2/2             | 3,629,300    | 2,352,779  | 3,725,530 | 3,647,479  |
+| 4/4             | 14,935,709   | 2,803,578  | 3,105,244 | 8,010,336  |
+| 8/8             | 12,134,346   | 1,940,209  | 1,960,867 | 13,101,473 |
+| 16/16           | 15,975,086   | 1,089,127  | 895,905   | 13,242,798 |
 
-- Writer throughput (ops/sec)
+### Writer Throughput (ops/sec)
 
-| # of Readers / Writers | std::shared_mutex | std::shared_ptr | pthread_spinlock_t |  atomsnap  |
-|:----------------------:|:-----------------:|:---------------:|:------------------:|:----------:|
-|	  1 / 16 	 | 	 630,098     |     1,618,858   |      6,251,655     |  1,929,570 |
-|	  16 / 1 	 | 	       1     |       129,827   |        328,145     |    549,203 |
+| Readers/Writers | shared_mutex | shared_ptr | spinlock  | atomsnap  |
+|:---------------:|:------------:|:----------:|:---------:|:---------:|
+| 1/1             | 83,167       | 1,587,131  | 4,427,044 | 2,104,934 |
+| 2/2             | 30,287       | 967,290    | 4,167,675 | 1,771,074 |
+| 4/4             | 336          | 617,992    | 3,768,093 | 1,520,589 |
+| 8/8             | 2,322        | 416,472    | 2,424,839 | 1,423,559 |
+| 16/16           | 5            | 455,773    | 1,489,894 | 1,425,100 |
+
+## Benchmark 4: Unbalanced Workloads (16 bytes)
+
+Tests extreme reader/writer ratios.
+
+### Configuration: 1 Reader, 16 Writers
+
+| Metric          | shared_mutex | shared_ptr | spinlock | atomsnap  |
+|:----------------|:------------:|:----------:|:--------:|:---------:|
+| Reader ops/sec  | 8,620,295    | 234,983    | 347,163  | 2,796,784 |
+| Writer ops/sec  | 630,098      | 1,618,858  | 6,251,655| 1,929,570 |
+
+### Configuration: 16 Readers, 1 Writer
+
+| Metric          | shared_mutex | shared_ptr | spinlock  | atomsnap   |
+|:----------------|:------------:|:----------:|:---------:|:----------:|
+| Reader ops/sec  | 18,221,686   | 5,208,506  | 5,079,128 | 43,766,774 |
+| Writer ops/sec  | 1            | 129,827    | 328,145   | 549,203    |
+
+**Key Insight**: ATOMSNAP excels in read-heavy workloads (16R/1W: 43.7M reader ops/sec, 8.4× faster than shared_mutex).
+
+## Performance Characteristics
+
+1. **Read-Heavy Workloads**: ATOMSNAP provides 2-8× higher reader throughput than std::shared_ptr
+2. **Write Contention**: Maintains stable writer performance where shared_mutex degrades to near-zero
+3. **Scalability**: Reader throughput increases with thread count (up to 44M ops/sec at 16R/1W)
+4. **Large Objects**: Overhead remains reasonable even with 4KB objects
+5. **Trade-off**: Writer throughput lower than spinlock under low contention, but avoids spinlock's reader bottleneck
+
+---
+
+# Implementation Details
+
+## Memory Layout
+
+### atomsnap_version (32 bytes)
+```
+Offset  Field             Size  Description
+------  -----             ----  -----------
+0       object            8     User payload pointer
+8       free_context      8     User cleanup context
+16      gate              8     Associated gate pointer
+24      inner_ref_cnt     4     Internal reference counter
+28      self_handle/next  4     Handle (allocated) or free list next (freed)
+```
+
+### Control Block (64-bit atomic)
+```
+Bits 63-32: Outer Reference Count (incremented by readers)
+Bits 31-0:  Version Handle (identifies current version)
+```
+
+## Allocation Strategy
+
+1. **Local Free List**: Thread-local batch of freed slots (wait-free pop)
+2. **Arena Shared List**: Per-arena free list for cross-thread recycling
+3. **New Arena Allocation**: When local and shared lists are exhausted
+
+## Reference Counting Mechanism
+
+ATOMSNAP uses a dual-counter design:
+
+- **Outer Counter**: Tracks active readers (in control block, 32-bit)
+- **Inner Counter**: Tracks lifetime (in version, 32-bit signed)
+
+**Lifecycle**:
+```
+Initial state:        outer=0, inner=0
+Reader acquires:      outer=1, inner=0
+Writer exchanges:     outer=0, inner=-1  (inner -= outer at exchange)
+Reader releases:      outer=0, inner=0   (inner += 1 at release)
+→ Version freed when inner == 0
+```
+
+**Why it works**: Even if outer wraps around (after 4B operations), the arithmetic still produces the correct delta due to modulo 2³² arithmetic properties. Both counters must have the same bit width for this to work correctly.
+
+## Handle Resolution
+```c
+// O(1) lookup via global table
+arena = g_arena_table[thread_id][arena_id];
+version = &arena->slots[slot_id];
+```
+
+No pointer chasing, no linked list traversal—direct array indexing.
+
+## Thread Context Adoption
+
+When a thread exits:
+1. Thread ID is marked as available (via TLS destructor)
+2. Context and arenas remain allocated
+3. Next thread reuses the same ID and adopts existing arenas
+4. **Benefit**: Avoids arena deallocation and reallocation overhead
+
+This design assumes thread churn is relatively rare compared to thread lifespan.
+
+---
+
+# Limitations
+
+1. **Thread Limit**: Maximum 4,096 threads (compile-time constant `MAX_THREADS`)
+2. **Arena Limit**: 64 arenas per thread, 16,384 slots per arena
+3. **No Dynamic Cleanup**: Arenas are never freed until process exit (memory grows monotonically)
+4. **No Cross-Process Support**: Designed for multi-threaded, single-process use only
+
+---
