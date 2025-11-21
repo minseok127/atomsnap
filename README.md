@@ -23,9 +23,8 @@ ATOMSNAP is designed for scenarios where:
 
 1. **Acquire-Release Pairing**: Every `atomsnap_acquire_version()` must have a matching `atomsnap_release_version()`
 2. **No Nested Acquires**: Do not acquire multiple versions without releasing previous ones
-3. **Reference Count Limit**: If outer reference count exceeds 4,294,967,295 (UINT32_MAX), behavior is undefined
-4. **CAS Ordering**: When using `atomsnap_compare_exchange_version()`, always call `atomsnap_release_version()` AFTER the CAS operation to prevent ABA problems
-5. **Failed CAS Cleanup**: When CAS fails, manually free the unused version with `atomsnap_free_version()` or reuse the version to prevent memory leaks
+3. **CAS Ordering**: When using `atomsnap_compare_exchange_version()`, always call `atomsnap_release_version()` AFTER the CAS operation to prevent ABA problems
+4. **Failed CAS Cleanup**: When CAS fails, manually free the unused version with `atomsnap_free_version()` or reuse the version to prevent memory leaks
 
 ---
 
