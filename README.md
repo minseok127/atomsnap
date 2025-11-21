@@ -25,12 +25,7 @@ A library for managing a grace period.
 
 - Acquiring and releasing a version must always be paired.
 - Avoid repeated acquisition without release.
-- If the acquisition-release gap exceeds 0xFFFF (uint16_t), behavior is unpredictable.
-
-### Memory Assumption
-
-- Assumes user virtual memory is limited to 48 bits.
-- Using memory beyond this range requires additional implementation.
+- If the acquisition-release gap exceeds 0xFFFFFFFF (uint32_t), behavior is unpredictable.
 
 # Build
 ```
