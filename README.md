@@ -68,7 +68,6 @@ ATOMSNAP uses 32-bit handles instead of direct pointers for version management:
 ```
 
 This design enables:
-- Efficient ABA problem prevention
 - Compact control block representation (64-bit total)
 - Fast handle-to-pointer resolution via table lookup
 
