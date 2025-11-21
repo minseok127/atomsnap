@@ -402,6 +402,57 @@ atomsnap_release_version(ver2);
 
 ---
 
+# Comparison with Userspace RCU (liburcu)
+
+To understand the performance results, it helps to look at how `liburcu` manages memory compared to `atomsnap`.
+
+### How `liburcu-memb` Works (Internal Mechanism)
+
+This section details the implementation of the `liburcu-memb` flavor, specifically focusing on how it leverages the Linux kernel's `sys_membarrier` to achieve low-overhead readers.
+
+#### 3.1. Global & Thread-Local State
+* **`rcu_gp.ctr` (Global Counter)**: A global atomic variable tracking the current grace period phase. The lower bits are used to store the current phase (0 or 1).
+* **`urcu_memb_reader.ctr` (Thread-Local Counter)**: Each registered reader thread maintains a thread-local storage (TLS) variable. This variable indicates the thread's current state:
+    * `0`: The thread is **inactive** (not in a critical section).
+    * `Value matching rcu_gp.ctr`: The thread is **active** and observing the current grace period.
+
+#### 3.2. Reader Side: `rcu_read_lock()`
+The reader entry function is optimized to avoid hardware memory barriers (`MFENCE` or `LOCK` instructions) on the fast path.
+
+1.  **Load Global Counter**: The function loads the current value of `rcu_gp.ctr`.
+2.  **Store to Local Counter**: It stores this value into the reader's `urcu_memb_reader.ctr`.
+    * **Compiler Barrier Only**: Crucially, this operation uses `atomic_signal_fence(memory_order_cst)`. This prevents the *compiler* from reordering instructions across the lock, but allows the *CPU* to reorder memory accesses, preserving pipeline performance.
+3.  **Nesting**: If `urcu_memb_reader.ctr` is already non-zero, it increments a nesting counter and returns immediately.
+
+#### 3.3. Writer Side: `synchronize_rcu()`
+The writer must ensure that any reader potentially holding a reference to old data has finished. Since readers do not issue full memory barriers, the writer must enforce them externally.
+
+1.  **Force Memory Barrier (Pre-Flip)**:
+    * The writer calls **`sys_membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED)`**.
+    * **Kernel Action**: The kernel sends Inter-Processor Interrupts (IPIs) to all CPUs running threads of the process. This forces a hardware memory barrier on those CPUs.
+    * **Guarantee**: This ensures that any prior memory accesses by readers (specifically, setting their `urcu_memb_reader.ctr`) are visible to the writer.
+
+2.  **Wait for Current Phase**:
+    * The writer iterates over all registered readers.
+    * It waits for every reader's `urcu_memb_reader.ctr` to either be `0` (inactive) or match the current global phase (implying they saw the update).
+
+3.  **Phase Flip**:
+    * The writer atomically toggles the phase bit of `rcu_gp.ctr` (e.g., `0` -> `1`).
+
+4.  **Force Memory Barrier (Post-Flip)**:
+    * Another call to **`sys_membarrier()`** is made.
+    * This ensures that the new `rcu_gp.ctr` value is visible to all readers before the writer proceeds.
+
+5.  **Wait for Old Phase**:
+    * The writer scans the readers again.
+    * It blocks until no reader is observed holding the *old* phase value. If a reader still has the old phase, the writer waits until that reader exits its critical section (setting `ctr` to 0) or updates to the new phase.
+
+#### 3.4. Performance Implications
+* **Readers**: Execute strictly local `LOAD` and `STORE` operations with no atomic RMW (Read-Modify-Write) instructions. Performance is close to a raw variable access.
+* **Writers**: Incur the overhead of two `sys_membarrier` system calls and potential blocking waits. This makes `liburcu-memb` write-heavy operations significantly slower than `atomsnap`, which uses non-blocking atomic exchanges.
+
+---
+
 # Performance Comparison
 
 ## Environment
@@ -414,119 +465,69 @@ atomsnap_release_version(ver2);
 
 ## Benchmark 1: Stateless TAS (16 bytes)
 
-Writers use unconditional exchange. Object size is 16 bytes.
-```bash
-$ git clone https://github.com/minseok127/atomsnap.git
-$ cd atomsnap && git checkout test && make
-$ cd example/exchange && make
-$ ./atomsnap_example 8 8 100
-```
+Writers use unconditional exchange.
 
 ### Reader Throughput (ops/sec)
 
-| Readers/Writers | std::shared_ptr | atomsnap   | Speedup |
-|:---------------:|:---------------:|:----------:|:-------:|
-| 1/1             | 4,118,869       | 15,364,317 | 3.73×   |
-| 2/2             | 3,919,675       | 12,911,508 | 3.29×   |
-| 4/4             | 3,157,681       | 17,237,426 | 5.46×   |
-| 8/8             | 2,421,110       | 18,977,734 | 7.84×   |
-| 16/16           | 2,914,017       | 19,803,148 | 6.79×   |
+| Readers/Writers | std::shared_ptr | atomsnap   | urcu (memb)  |
+|:---------------:|:---------------:|:----------:|:------------:|
+| 1/1             | 4,118,869       | 15,364,317 | 22,938,519   |
+| 2/2             | 3,919,675       | 12,911,508 | 75,880,492   |
+| 4/4             | 3,157,681       | 17,237,426 | 153,899,850  |
+| 8/8             | 2,421,110       | 18,977,734 | 265,617,635  |
+| 16/16           | 2,914,017       | 19,803,148 | 382,315,056  |
 
 ### Writer Throughput (ops/sec)
 
-| Readers/Writers | std::shared_ptr | atomsnap  | Speedup |
-|:---------------:|:---------------:|:---------:|:-------:|
-| 1/1             | 2,290,178       | 6,536,867 | 2.85×   |
-| 2/2             | 1,874,746       | 5,934,981 | 3.17×   |
-| 4/4             | 1,419,709       | 7,147,858 | 5.03×   |
-| 8/8             | 1,122,508       | 7,605,056 | 6.78×   |
-| 16/16           | 1,356,290       | 7,342,350 | 5.41×   |
+| Readers/Writers | std::shared_ptr | atomsnap  | urcu (memb) |
+|:---------------:|:---------------:|:---------:|:-----------:|
+| 1/1             | 2,290,178       | 6,536,867 | 327,205     |
+| 2/2             | 1,874,746       | 5,934,981 | 130,919     |
+| 4/4             | 1,419,709       | 7,147,858 | 98,408      |
+| 8/8             | 1,122,508       | 7,605,056 | 58,712      |
+| 16/16           | 1,356,290       | 7,342,350 | 3,763       |
 
 ## Benchmark 2: Stateful CAS (16 bytes)
 
-Writers use conditional exchange with retry. Compared against mutex and spinlock.
-```bash
-$ cd example/cmp_exchange && make
-$ ./atomsnap_example 8 8 100
-```
+Writers use conditional exchange with retry.
 
 ### Reader Throughput (ops/sec)
 
-| Readers/Writers | shared_mutex | shared_ptr | spinlock   | atomsnap   |
-|:---------------:|:------------:|:----------:|:----------:|:----------:|
-| 1/1             | 483,073      | 4,168,734  | 13,861,844 | 13,345,141 |
-| 2/2             | 10,806,981   | 3,790,341  | 7,474,572  | 14,037,157 |
-| 4/4             | 13,945,730   | 3,082,837  | 4,546,094  | 17,340,585 |
-| 8/8             | 17,149,214   | 2,567,489  | 4,055,162  | 19,344,667 |
-| 16/16           | 17,000,505   | 2,372,081  | 1,608,919  | 21,623,425 |
+| Readers/Writers | shared_mutex | shared_ptr | spinlock   | atomsnap   | urcu (memb) |
+|:---------------:|:------------:|:----------:|:----------:|:----------:|:-----------:|
+| 1/1             | 483,073      | 4,168,734  | 13,861,844 | 13,345,141 | 22,389,676  |
+| 2/2             | 10,806,981   | 3,790,341  | 7,474,572  | 14,037,157 | 75,936,437  |
+| 4/4             | 13,945,730   | 3,082,837  | 4,546,094  | 17,340,585 | 158,888,978 |
+| 8/8             | 17,149,214   | 2,567,489  | 4,055,162  | 19,344,667 | 276,082,043 |
+| 16/16           | 17,000,505   | 2,372,081  | 1,608,919  | 21,623,425 | 377,963,931 |
 
 ### Writer Throughput (ops/sec)
 
-| Readers/Writers | shared_mutex | shared_ptr | spinlock   | atomsnap  |
-|:---------------:|:------------:|:----------:|:----------:|:---------:|
-| 1/1             | 395,415      | 2,152,445  | 13,621,219 | 6,104,996 |
-| 2/2             | 150,856      | 1,444,993  | 5,589,843  | 3,325,338 |
-| 4/4             | 27,958       | 1,103,961  | 3,962,019  | 2,238,743 |
-| 8/8             | 8,882        | 528,600    | 2,639,648  | 1,344,667 |
-| 16/16           | 11           | 693,230    | 1,639,855  | 1,324,588 |
+| Readers/Writers | shared_mutex | shared_ptr | spinlock   | atomsnap  | urcu (memb) |
+|:---------------:|:------------:|:----------:|:----------:|:---------:|:-----------:|
+| 1/1             | 395,415      | 2,152,445  | 13,621,219 | 6,104,996 | 317,286     |
+| 2/2             | 150,856      | 1,444,993  | 5,589,843  | 3,325,338 | 131,496     |
+| 4/4             | 27,958       | 1,103,961  | 3,962,019  | 2,238,743 | 95,164      |
+| 8/8             | 8,882        | 528,600    | 2,639,648  | 1,344,667 | 61,349      |
+| 16/16           | 11           | 693,230    | 1,639,855  | 1,324,588 | 3,811       |
 
-**Key Insight**: shared_mutex writer throughput collapses under contention (11 ops/sec at 16/16). ATOMSNAP maintains 1.3M ops/sec while providing superior reader performance.
-
-## Benchmark 3: Large Object CAS (4 KB)
-
-Object size is 4096 bytes. Tests scalability with larger memory footprint.
-```bash
-$ cd example/cmp_exchange_large && make
-$ ./atomsnap_example 8 8 100
-```
-
-### Reader Throughput (ops/sec)
-
-| Readers/Writers | shared_mutex | shared_ptr | spinlock  | atomsnap   |
-|:---------------:|:------------:|:----------:|:---------:|:----------:|
-| 1/1             | 70,052       | 2,001,176  | 3,805,337 | 1,915,966  |
-| 2/2             | 3,629,300    | 2,352,779  | 3,725,530 | 3,647,479  |
-| 4/4             | 14,935,709   | 2,803,578  | 3,105,244 | 8,010,336  |
-| 8/8             | 12,134,346   | 1,940,209  | 1,960,867 | 13,101,473 |
-| 16/16           | 15,975,086   | 1,089,127  | 895,905   | 13,242,798 |
-
-### Writer Throughput (ops/sec)
-
-| Readers/Writers | shared_mutex | shared_ptr | spinlock  | atomsnap  |
-|:---------------:|:------------:|:----------:|:---------:|:---------:|
-| 1/1             | 83,167       | 1,587,131  | 4,427,044 | 2,104,934 |
-| 2/2             | 30,287       | 967,290    | 4,167,675 | 1,771,074 |
-| 4/4             | 336          | 617,992    | 3,768,093 | 1,520,589 |
-| 8/8             | 2,322        | 416,472    | 2,424,839 | 1,423,559 |
-| 16/16           | 5            | 455,773    | 1,489,894 | 1,425,100 |
-
-## Benchmark 4: Unbalanced Workloads (16 bytes)
+## Benchmark 3: Unbalanced Workloads (16 bytes)
 
 Tests extreme reader/writer ratios.
 
 ### Configuration: 1 Reader, 16 Writers
 
-| Metric          | shared_mutex | shared_ptr | spinlock | atomsnap  |
-|:----------------|:------------:|:----------:|:--------:|:---------:|
-| Reader ops/sec  | 8,620,295    | 234,983    | 347,163  | 2,796,784 |
-| Writer ops/sec  | 630,098      | 1,618,858  | 6,251,655| 1,929,570 |
+| Metric          | shared_mutex | shared_ptr | spinlock | atomsnap  | urcu (memb) |
+|:----------------|:------------:|:----------:|:--------:|:---------:|:-----------:|
+| Reader ops/sec  | 8,620,295    | 234,983    | 347,163  | 2,796,784 | 40,273,630  |
+| Writer ops/sec  | 630,098      | 1,618,858  | 6,251,655| 1,929,570 | 108,184     |
 
 ### Configuration: 16 Readers, 1 Writer
 
-| Metric          | shared_mutex | shared_ptr | spinlock  | atomsnap   |
-|:----------------|:------------:|:----------:|:---------:|:----------:|
-| Reader ops/sec  | 18,221,686   | 5,208,506  | 5,079,128 | 43,766,774 |
-| Writer ops/sec  | 1            | 129,827    | 328,145   | 549,203    |
-
-**Key Insight**: ATOMSNAP excels in read-heavy workloads (16R/1W: 43.7M reader ops/sec, 8.4× faster than shared_mutex).
-
-## Performance Characteristics
-
-1. **Read-Heavy Workloads**: ATOMSNAP provides 2-8× higher reader throughput than std::shared_ptr
-2. **Write Contention**: Maintains stable writer performance where shared_mutex degrades to near-zero
-3. **Scalability**: Reader throughput increases with thread count (up to 44M ops/sec at 16R/1W)
-4. **Large Objects**: Overhead remains reasonable even with 4KB objects
-5. **Trade-off**: Writer throughput lower than spinlock under low contention, but avoids spinlock's reader bottleneck
+| Metric          | shared_mutex | shared_ptr | spinlock  | atomsnap   | urcu (memb) |
+|:----------------|:------------:|:----------:|:---------:|:----------:|:-----------:|
+| Reader ops/sec  | 18,221,686   | 5,208,506  | 5,079,128 | 43,766,774 | 354,783,087 |
+| Writer ops/sec  | 1            | 129,827    | 328,145   | 549,203    | 49,727      |
 
 ---
 
@@ -590,7 +591,6 @@ When a thread exits:
 1. Thread ID is marked as available (via TLS destructor)
 2. Context and arenas remain allocated
 3. Next thread reuses the same ID and adopts existing arenas
-4. **Benefit**: Avoids arena deallocation and reallocation overhead
 
 This design assumes thread churn is relatively rare compared to thread lifespan.
 
