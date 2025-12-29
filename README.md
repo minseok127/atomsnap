@@ -1,6 +1,6 @@
 # ATOMSNAP
 
-This library is a wait-free, and lock-free concurrency primitive for managing shared object with multiple versions. It allows multiple readers and writers to access a shared pointer simultaneously without blocking, ensuring system-wide progress and low latency.
+This library is a wait-free and lock-free concurrency primitive for managing shared objects with multiple versions. It allows multiple readers and writers to access a shared pointer simultaneously without blocking, ensuring system-wide progress and low latency.
 
 ### Key Features
 
@@ -54,7 +54,7 @@ $ make BUILD_MODE=debug
 ### 1. Control Block Layout (64-bit)
 
 The core atomic variable is a 64-bit control block that packs both the reference count and the version handle.
-This ensures that reading the pointer and incrementing the reference count happens in a single atomic instruction.
+This ensures that reading the pointer and incrementing the reference count happen in a single atomic instruction.
 
 ```
 +----------------+---------------------------------------+
@@ -75,7 +75,7 @@ The 40-bit handle uniquely identifies a version slot within the global memory sp
 - Arena ID (6-bit): Identifies the specific arena within the thread's context (0 ~ 63).
 - Slot ID (14-bit): Identifies the slot index within the arena (0 ~ 16,382).
 
-Note: MAX_THREADS is limited to $1,048,575$ to prevent the handle from conflicting with the HANDLE_NULL value (all bits set to 1).
+Note: MAX_THREADS is limited to $1,048,575$ to prevent the handle from conflicting with `HANDLE_NULL` value (all bits set to 1).
 
 ### 3. Memory Arena & Page Alignment
 
@@ -92,28 +92,26 @@ Memory is managed in Arenas, which are contiguous blocks of pre-allocated slots.
 - Arena-level shared list for cross-thread recycling
 - Sentinel-based wait-free push operation
 
-**Lifecycle**:
-1. Writer allocates version from thread-local arena
-2. Writer sets object and exchanges version atomically
-3. Readers increment outer reference count on acquire (control block)
-4. Writer decrements inner reference count on exchange (by outer count value)
-5. Readers increment inner reference count on release
-6. Version freed when inner reference count reaches zero
-
-## Reference Counting Algorithm
+### 4. Reference Counting Algorithm
 
 Atomsnap uses a dual-counter approach to manage object lifecycles safely without locks.
 
 1. **Outer Reference Count (24-bit)**: Located in the Control Block. Counts the number of times a version has been Acquired.
 2. **Inner Reference Count (32-bit)**: Located in the Version object. Counts the number of times a version has been Released.
 
-### The Mismatch Problem & Solution
+**Lifecycle**:
+1. Writer allocates version from thread-local arena.
+2. Writer sets object and exchanges version atomically.
+3. **Readers increment outer reference count on acquire (control block).**
+4. **Writer decrements inner reference count on exchange (by outer count value).**
+5. **Readers increment inner reference count on release.**
+6. Version freed when inner reference count reaches zero.
 
 Since the Outer counter (24-bit) and Inner counter (32-bit) have different bit-widths, simply subtracting them would lead to errors. Atomsnap solves this with a robust normalization logic:
 
 - **Masking**: The Inner counter is masked to the 24-bit domain.
 - **Subtraction**: Active Readers = (Inner Releases - Outer Acquires).
-- **Wraparound Correction**: If the outer counter wraps around relative to the inner counter, the algorithm detects the anomaly (positive result) and applies a WRAPAROUND_FACTOR ($2^{24}$) correction.
+- **Wraparound Correction**: If the outer counter wraps around relative to the inner counter, the algorithm detects the anomaly (positive result) and applies a `WRAPAROUND_FACTOR` ($2^{24}$) correction.
 
 ---
 
