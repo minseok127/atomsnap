@@ -82,7 +82,7 @@
  *
  * Thus, 16,383 is the optimal number of slots.
  */
-#define SLOTS_PER_ARENA       (16384)
+#define SLOTS_PER_ARENA       (16383)
 
 /* Bit layout for the 40-bit handle */
 #define HANDLE_SLOT_BITS      (14)
@@ -108,7 +108,7 @@
 #define WRAPAROUND_FACTOR     (0x1000000)
 #define WRAPAROUND_MASK       (0xFFFFFF)
 
-/* Error logging macro to match trcache style */
+/* Error logging macro */
 #define errmsg(fmt, ...) \
 	fprintf(stderr, "[atomsnap:%d:%s] " fmt, __LINE__, __func__, ##__VA_ARGS__)
 
