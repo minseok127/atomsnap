@@ -1,30 +1,26 @@
 # ATOMSNAP
 
-A library for managing a grace period.
-
-## Overview
-
-ATOMSNAP enables multiple writers to safely modify shared objects while guaranteeing readers always see consistent snapshots. Unlike traditional locking mechanisms, ATOMSNAP achieves this through version management with wait-free reader access and lock-free writer updates.
+This library is a wait-free, and lock-free concurrency primitive for managing shared object with multiple versions. It allows multiple readers and writers to access a shared pointer simultaneously without blocking, ensuring system-wide progress and low latency.
 
 ### Key Features
 
-- **Wait-Free Reads**: Readers acquire object versions without blocking or spinning
-- **Lock-Free Writes**: Writers update objects using atomic operations (TAS/CAS)
-- **Memory Safety**: Automatic garbage collection through reference counting
-- **Version Consistency**: Readers never observe partially updated objects
+- **Wait-Free Reads**: Readers acquire object versions without blocking or spinning.
+- **Lock-Free Writes**: Writers update objects using atomic operations (TAS/CAS).
+- **Memory Safety**: Automatic garbage collection through reference counting.
+- **Version Consistency**: Readers never observe partially updated objects.
 
 ### Use Cases
 
-ATOMSNAP is designed for scenarios where:
-- Objects are too large for single atomic instructions (>8 bytes)
-- Readers require consistent snapshots without tearing
+- Objects are too large for single atomic instructions (>8 bytes).
+- Readers require consistent snapshots without tearing.
 
 ## Critical Usage Rules
 
-1. **Acquire-Release Pairing**: Every `atomsnap_acquire_version()` must have a matching `atomsnap_release_version()`
-2. **No Nested Acquires**: Do not acquire multiple versions without releasing previous ones
-3. **CAS Ordering**: When using `atomsnap_compare_exchange_version()`, always call `atomsnap_release_version()` AFTER the CAS operation to prevent ABA problems
-4. **Failed CAS Cleanup**: When CAS fails, manually free the unused version with `atomsnap_free_version()` or retry CAS with that version to prevent memory leaks
+1. **Acquire-Release Pairing**: Every `atomsnap_acquire_version()` must have a matching `atomsnap_release_version()`.
+2. **No Nested Acquires**: Do not acquire multiple versions without releasing previous ones.
+3. **CAS Ordering**: When using `atomsnap_compare_exchange_version()`, always call `atomsnap_release_version()` AFTER the CAS operation to prevent ABA problems.
+4. **Failed CAS Cleanup**: When CAS fails, manually free the unused version with `atomsnap_free_version()` or retry CAS with that version to prevent memory leaks.
+5. **MAX_THREADS**: This library supports a global maximum of 1,048,575 threads.
 
 ---
 
@@ -55,43 +51,41 @@ $ make BUILD_MODE=debug
 
 ## Core Concepts
 
-### Handle-Based Design
+### 1. Control Block Layout (64-bit)
 
-ATOMSNAP uses 32-bit handles instead of direct pointers for version management:
+The core atomic variable is a 64-bit control block that packs both the reference count and the version handle.
+This ensures that reading the pointer and incrementing the reference count happens in a single atomic instruction.
+
 ```
-┌─────────────────────────────────────┐
-│  32-bit Handle                      │
-├──────────┬──────────┬───────────────┤
-│  Thread  │  Arena   │  Slot         │
-│  (12bit) │  (6bit)  │  (14bit)      │
-└──────────┴──────────┴───────────────┘
-```
-
-This design enables:
-- Compact control block representation (64-bit total)
-- Fast handle-to-pointer resolution via table lookup
-
-### Control Block Structure
-
-Each gate maintains a 64-bit atomic control block:
-```
-┌─────────────────────────────────────┐
-│  64-bit Control Block               │
-├──────────────────┬──────────────────┤
-│  Reference Count │  Version Handle  │
-│  (32bit)         │  (32bit)         │
-└──────────────────┴──────────────────┘
++----------------+---------------------------------------+
+| RefCount (24b) |             Handle (40b)              |
++----------------+---------------------------------------+
+|    Acquires    |       Thread ID | Arena ID | Slot ID  |
++----------------+---------------------------------------+
 ```
 
-- **Reference Count**: Number of readers currently accessing this version
-- **Version Handle**: Identifies the current version
+- Reference Count (24-bit): Tracks the number of Acquires (active readers) for the current version.
+- Handle (40-bit): A unique identifier for the `atomsnap_version`.
 
-### Memory Management
+### 2. Handle Structure (40-bit)
 
-**Per-Thread Arenas**:
-- Each thread owns up to 64 arenas
-- Each arena contains 16,384 version slots
-- Maximum capacity: 4,096 threads × 64 arenas × 16,384 slots ≈ 4.3B versions
+The 40-bit handle uniquely identifies a version slot within the global memory space.
+
+- Thread ID (20-bit): Identifies the owner thread (0 ~ 1,048,574).
+- Arena ID (6-bit): Identifies the specific arena within the thread's context (0 ~ 63).
+- Slot ID (14-bit): Identifies the slot index within the arena (0 ~ 16,382).
+
+Note: MAX_THREADS is limited to $1,048,575$ to prevent the handle from conflicting with the HANDLE_NULL value (all bits set to 1).
+
+### 3. Memory Arena & Page Alignment
+
+Memory is managed in Arenas, which are contiguous blocks of pre-allocated slots.
+
+- Page Alignment: Each arena is designed to fit perfectly within 160 memory pages (4KB pages).
+- `SLOTS_PER_ARENA` is set to 16,383.
+    - Formula: $8\text{B (Header)} + (16,383 \times 40\text{B}) = 655,328\text{ Bytes}$
+    - Capacity: $160 \times 4096\text{B} = 655,360\text{ Bytes}$
+    - Wasted Space: Only 32 Bytes per arena (0.004% fragmentation).
 
 **Free List Design**:
 - Thread-local batch for fast allocation (wait-free)
@@ -105,6 +99,21 @@ Each gate maintains a 64-bit atomic control block:
 4. Writer decrements inner reference count on exchange (by outer count value)
 5. Readers increment inner reference count on release
 6. Version freed when inner reference count reaches zero
+
+## Reference Counting Algorithm
+
+Atomsnap uses a dual-counter approach to manage object lifecycles safely without locks.
+
+1. **Outer Reference Count (24-bit)**: Located in the Control Block. Counts the number of times a version has been Acquired.
+2. **Inner Reference Count (32-bit)**: Located in the Version object. Counts the number of times a version has been Released.
+
+### The Mismatch Problem & Solution
+
+Since the Outer counter (24-bit) and Inner counter (32-bit) have different bit-widths, simply subtracting them would lead to errors. Atomsnap solves this with a robust normalization logic:
+
+- **Masking**: The Inner counter is masked to the 24-bit domain.
+- **Subtraction**: Active Readers = (Inner Releases - Outer Acquires).
+- **Wraparound Correction**: If the outer counter wraps around relative to the inner counter, the algorithm detects the anomaly (positive result) and applies a WRAPAROUND_FACTOR ($2^{24}$) correction.
 
 ---
 
@@ -475,79 +484,5 @@ Tests extreme reader/writer ratios.
 |:----------------|:------------:|:----------:|:---------:|:----------:|:-----------:|
 | Reader ops/sec  | 18,221,686   | 5,208,506  | 5,079,128 | 43,766,774 | 354,783,087 |
 | Writer ops/sec  | 1            | 129,827    | 328,145   | 549,203    | 49,727      |
-
----
-
-# Implementation Details
-
-## Memory Layout
-
-### atomsnap_version (32 bytes)
-```
-Offset  Field             Size  Description
-------  -----             ----  -----------
-0       object            8     User payload pointer
-8       free_context      8     User cleanup context
-16      gate              8     Associated gate pointer
-24      inner_ref_cnt     4     Internal reference counter
-28      self_handle/next  4     Handle (allocated) or free list next (freed)
-```
-
-### Control Block (64-bit atomic)
-```
-Bits 63-32: Outer Reference Count (incremented by readers)
-Bits 31-0:  Version Handle (identifies current version)
-```
-
-## Allocation Strategy (atomsnap_version)
-
-1. **Local Free List**: Thread-local batch of freed slots (wait-free pop)
-2. **Arena Shared List**: Per-arena free list for cross-thread recycling
-3. **New Arena Allocation**: When local and shared lists are exhausted
-
-## Reference Counting Mechanism
-
-ATOMSNAP uses a dual-counter design:
-
-- **Outer Counter**: Tracks active readers (in control block, 32-bit)
-- **Inner Counter**: Tracks lifetime (in version, 32-bit signed)
-
-**Lifecycle**:
-```
-Initial state:        outer=0, inner=0
-Reader acquires:      outer=1, inner=0
-Writer exchanges:     outer=0, inner=-1  (inner -= outer at exchange)
-Reader releases:      outer=0, inner=0   (inner += 1 at release)
-→ Version freed when inner == 0
-```
-
-**Why it works**: Even if outer wraps around (after 4B operations), the arithmetic still produces the correct delta due to modulo 2³² arithmetic properties. Both counters must have the same bit width for this to work correctly.
-
-## Handle Resolution
-```c
-// O(1) lookup via global table
-arena = g_arena_table[thread_id][arena_id];
-version = &arena->slots[slot_id];
-```
-
-No pointer chasing, no linked list traversal—direct array indexing.
-
-## Thread Context Adoption
-
-When a thread exits:
-1. Thread ID is marked as available (via TLS destructor)
-2. Context and arenas remain allocated
-3. Next thread reuses the same ID and adopts existing arenas
-
-This design assumes thread churn is relatively rare compared to thread lifespan.
-
----
-
-# Limitations
-
-1. **Thread Limit**: Maximum 4,096 threads (compile-time constant `MAX_THREADS`)
-2. **Arena Limit**: 64 arenas per thread, 16,384 slots per arena
-3. **No Dynamic Cleanup**: Arenas are never freed until process exit (memory grows monotonically)
-4. **No Cross-Process Support**: Designed for multi-threaded, single-process use only
 
 ---
