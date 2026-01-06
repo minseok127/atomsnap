@@ -2,18 +2,28 @@
  * @file    atomsnap.c
  * @brief   Implementation of the atomsnap library.
  *
- * This file implements a wait-free/lock-free mechanism for managing shared
+ * This file implements a lock-free mechanism for managing shared
  * objects with multiple versions using a handle-based approach.
  *
  * Design Overview:
  * - Handles: 40-bit integers composed of (Thread ID | Arena ID | Slot ID).
  * - Control Block: 64-bit atomic containing [24-bit RefCount | 40-bit Handle].
- * - Memory: Per-thread arenas with wait-free object pooling.
+ * - Memory: Per-thread arenas with #atomsnap_version pooling.
  *
  * Reference Counting Logic:
  *
+ * When a reader wants to access the current version, it atomically increments
+ * the outer reference counter using fetch_add(). The returned 64-bit value has
+ * its lower 40-bits representing the pointer of the version whose reference
+ * count was increased.
+ *
+ * After finishing the use of the version, the reader must release it.
+ * During release, the reader increments the inner reference counter by 1.
+ * If the resulting inner counter is 0, it indicates that no other threads are 
+ * referencing that version, so it can be freed.
+ *
  * The design handles a bit-width mismatch between the Outer Reference Count 
- * (24-bit, counts acquires) and the Inner Reference Count (32-bit, counts
+ * (24-bit, counts acquires) and the Inner Reference Count (64-bit, counts
  * releases).
  *
  * When a writer exchanges a version, it subtracts the snapshot of "Acquires" 
@@ -21,6 +31,16 @@
  * the Inner counter is first masked to the same 24-bit domain as the Outer 
  * counter. A wraparound factor is used to correct race conditions where 
  * a reader releases the version during the exchange process.
+ *
+ * Free List Logic (Updated - Stack Based):
+ *
+ * The free list management uses a "Lock-Free MPSC Stack" approach.
+ *
+ * - Producers (Free): Use a CAS loop to push nodes onto the arena's
+ *                     'top_handle'.
+ *
+ * - Consumer (Alloc): Uses 'atomic_exchange' to detach the entire stack from
+ *                     'top_handle' (Batch Steal).
  */
 
 #define _GNU_SOURCE
@@ -66,7 +86,7 @@
  * boundaries to minimize memory fragmentation.
  *
  * - atomsnap_version size: 40 bytes
- * - memory_arena header:   8 bytes (tail_handle)
+ * - memory_arena header:   8 bytes (top_handle)
  *
  * Calculation:
  * target_pages = 160 pages
@@ -105,8 +125,8 @@
  * Wraparound constants for 24-bit RefCount 
  * Used for correcting Inner RefCount (32-bit) to match Outer (24-bit) domain.
  */
-#define WRAPAROUND_FACTOR     (0x1000000)
-#define WRAPAROUND_MASK       (0xFFFFFF)
+#define WRAPAROUND_FACTOR     (0x1000000ULL)
+#define WRAPAROUND_MASK       (0xFFFFFFULL)
 
 /* Error logging macro */
 #define errmsg(fmt, ...) \
@@ -137,30 +157,20 @@ typedef union {
  * @gate:          Pointer to the gate this version belongs to.
  * @inner_ref_cnt: Internal reference counter for reader tracking.
  * @self_handle:   Handle identifying this version (when allocated).
- * @next_handle:   Handle to the next node in free list (when freed).
+ * @next_handle:   Handle to the next node in the stack (when freed).
  *
  * [ Memory Layout ]
  * 00-08: object (8B)
  * 08-16: free_context (8B)
  * 16-24: gate (8B)
- * 24-28: inner_ref_cnt (4B, int32_t)
- * 28-32: Padding (4B)
+ * 24-32: inner_ref_cnt (8B, int64_t)
  * 32-40: self_handle / next_handle (8B)
  */
 struct atomsnap_version {
-	/* Public-facing fields (accessed via getters/setters) */
 	void *object;
 	void *free_context;
 	struct atomsnap_gate *gate;
-
-	/* Internal management fields */
-	_Atomic int32_t inner_ref_cnt;
-
-	/*
-	 * Union to save space.
-	 * - Allocated: self_handle (to identify itself during release)
-	 * - Free: next_handle (to link in the free list)
-	 */
+	_Atomic int64_t inner_ref_cnt;
 	union {
 		uint64_t self_handle;
 		_Atomic uint64_t next_handle;
@@ -170,11 +180,11 @@ struct atomsnap_version {
 /*
  * memory_arena - Contiguous block of version slots.
  *
- * @tail_handle: Handle of the last node pushed to the shared list.
- * @slots:       Array of version structures. Slot 0 is the Sentinel.
+ * @top_handle: Handle of the top node in the shared stack.
+ * @slots:      Array of version structures. Slot 0 is the Sentinel.
  */
 struct memory_arena {
-	_Atomic uint64_t tail_handle;
+	_Atomic uint64_t top_handle;
 	struct atomsnap_version slots[SLOTS_PER_ARENA];
 };
 
@@ -183,18 +193,13 @@ struct memory_arena {
  *
  * @thread_id:         Assigned global thread ID.
  * @arenas:            Array of pointers to owned arenas.
- * @local_free_head:   Head of the local free list (batch).
- * @local_free_tail:   Tail of the local free list (batch).
+ * @local_top:         Top of the local free stack.
  * @current_arena_idx: Index of the arena currently being allocated from.
  */
 struct thread_context {
 	int thread_id;
 	struct memory_arena *arenas[MAX_ARENAS_PER_THREAD];
-	
-	/* Local Free List (Maintained as a segment/batch) */
-	uint64_t local_free_head;
-	uint64_t local_free_tail;
-
+	uint64_t local_top;
 	int current_arena_idx;
 };
 
@@ -343,7 +348,8 @@ static inline struct thread_context *get_or_init_thread_context(void)
 /**
  * @brief   Initialize a new arena.
  *
- * Sets up the Sentinel (slot 0) and links slots 1..N into the local free list.
+ * Sets up the Sentinel (slot 0) and links slots 1..N into the local free
+ * list as a Stack (LIFO).
  *
  * @param   ctx:        Thread context.
  * @param   arena_idx:  Index of the arena to initialize.
@@ -354,9 +360,8 @@ static int init_arena(struct thread_context *ctx, int arena_idx)
 {
 	struct memory_arena *arena;
 	int tid = ctx->thread_id;
-	uint64_t sentinel_handle, first_handle, last_handle;
-	uint64_t curr, next;
-	struct atomsnap_version *slot, *last_slot;
+	uint64_t sentinel_handle, curr, next_in_stack;
+	struct atomsnap_version *slot;
 	int i;
 
 	arena = aligned_alloc(PAGE_SIZE, sizeof(struct memory_arena));
@@ -370,45 +375,40 @@ static int init_arena(struct thread_context *ctx, int arena_idx)
 
 	/* Setup Sentinel (Slot 0) */
 	sentinel_handle = construct_handle(tid, arena_idx, 0);
+	
+	/* Sentinel points to NULL (Bottom of the stack) */
 	atomic_store(&arena->slots[0].next_handle, HANDLE_NULL);
 
-	/* Sentinel is the initial tail */
-	atomic_store(&arena->tail_handle, sentinel_handle);
+	/* Arena Top initially points to Sentinel */
+	atomic_store(&arena->top_handle, sentinel_handle);
 
 	/*
-	 * Link slots 1..N sequentially.
-	 * 1 -> 2 -> ... -> N -> (Old Local List)
+	 * Link slots 1..N sequentially to form a pre-filled stack.
+	 * Slot 1 -> Sentinel
+	 * Slot 2 -> Slot 1
+	 * ...
+	 * Slot N -> Slot N-1
+	 * Local Top -> Slot N
 	 */
-	first_handle = construct_handle(tid, arena_idx, 1);
-	last_handle = construct_handle(tid, arena_idx, SLOTS_PER_ARENA - 1);
+	next_in_stack = sentinel_handle;
 
-	for (i = 1; i < SLOTS_PER_ARENA - 1; i++) {
+	for (i = 1; i < SLOTS_PER_ARENA; i++) {
 		curr = construct_handle(tid, arena_idx, i);
-		next = construct_handle(tid, arena_idx, i + 1);
 		slot = resolve_handle(curr);
-		/* Initially in Free state, so next_handle is used */
-		slot->next_handle = next;
+		
+		/* Link current node to the node below it in the stack */
+		atomic_store(&slot->next_handle, next_in_stack);
+		next_in_stack = curr;
 	}
 
-	/* Link the last new slot to the existing local list */
-	last_slot = resolve_handle(last_handle);
-	
-	/* If local list was empty, next is NULL */
-	last_slot->next_handle = ctx->local_free_head;
-
-	/* If local list was empty, update tail to this new batch's tail */
-	if (ctx->local_free_head == HANDLE_NULL) {
-		ctx->local_free_tail = last_handle;
-	}
-
-	/* Update local head */
-	ctx->local_free_head = first_handle;
+	/* The last processed handle is the new top of the local stack */
+	ctx->local_top = next_in_stack;
 
 	return 0;
 }
 
 /**
- * @brief   Pop a slot from the local free list (Fast Path).
+ * @brief   Pop a slot from the local free list (Stack Pop).
  *
  * @param   ctx: Thread context.
  *
@@ -416,33 +416,30 @@ static int init_arena(struct thread_context *ctx, int arena_idx)
  */
 static uint64_t pop_local(struct thread_context *ctx)
 {
-	uint64_t handle, next_handle;
+	uint64_t handle;
 	struct atomsnap_version *slot;
+	atomsnap_handle_t h;
 
-	if (ctx->local_free_head == HANDLE_NULL) {
+	if (ctx->local_top == HANDLE_NULL) {
 		return HANDLE_NULL;
 	}
 
-	handle = ctx->local_free_head;
+	/* Check if the top is the Sentinel (Slot 0) */
+	h.raw = ctx->local_top;
+	if (h.slot_idx == 0) {
+		/* Stack is empty (hit sentinel) */
+		ctx->local_top = HANDLE_NULL;
+		return HANDLE_NULL;
+	}
+
+	handle = ctx->local_top;
 	slot = resolve_handle(handle);
 
 	/*
-	 * Check if this is the last node in the local list.
+	 * Move top to the next node down the stack.
 	 */
-	if (ctx->local_free_head == ctx->local_free_tail) {
-		/* List becomes empty */
-		ctx->local_free_head = HANDLE_NULL;
-		ctx->local_free_tail = HANDLE_NULL;
-	} else {
-		/*
-		 * Not the last node.
-		 * Spin-wait if the next pointer is not yet established by the pusher.
-		 */
-		while ((next_handle = atomic_load(&slot->next_handle)) == HANDLE_NULL) {
-			cpu_relax();
-		}
-		ctx->local_free_head = next_handle;
-	}
+	ctx->local_top = atomic_load_explicit(&slot->next_handle, 
+		memory_order_relaxed);
 
 	/* Restore self_handle for Allocated state */
 	slot->self_handle = handle;
@@ -453,8 +450,8 @@ static uint64_t pop_local(struct thread_context *ctx)
  * @brief   Allocates a slot handle.
  *
  * Strategy:
- * 1. Try Local List.
- * 2. Try Batch Steal from Arenas.
+ * 1. Try Local Stack (pop_local).
+ * 2. Try Batch Steal from Arenas (atomic_exchange).
  * 3. Init New Arena.
  *
  * @param   ctx: Thread context.
@@ -465,11 +462,10 @@ static uint64_t alloc_slot(struct thread_context *ctx)
 {
 	uint64_t handle;
 	struct memory_arena *arena;
-	struct atomsnap_version *sentinel;
-	uint64_t sentinel_handle, batch_head, batch_tail;
+	uint64_t sentinel_handle, batch_top, curr_top;
 	int i;
 
-	/* 1. Try Local Free List */
+	/* 1. Try Local Free Stack */
 	handle = pop_local(ctx);
 	if (handle != HANDLE_NULL) {
 		return handle;
@@ -478,36 +474,38 @@ static uint64_t alloc_slot(struct thread_context *ctx)
 	/* 2. Try Batch Steal from existing arenas */
 	for (i = 0; i <= ctx->current_arena_idx; i++) {
 		arena = ctx->arenas[i];
-		sentinel = &arena->slots[0];
 		sentinel_handle = construct_handle(ctx->thread_id, i, 0);
 
-		/* Check if there are nodes after sentinel (next != -1) */
-		if (atomic_load(&sentinel->next_handle) == HANDLE_NULL) {
+		/*
+		 * Check if there is anything to steal.
+		 * If top matches sentinel, the stack is empty (contains only sentinel).
+		 */
+		curr_top = atomic_load(&arena->top_handle);
+		if (curr_top == sentinel_handle) {
 			continue;
 		}
 
 		/*
-		 * Found a batch.
-		 * A. Detach Head from Sentinel (Atomic Store)
-		 * Only THIS thread consumes from its arenas (Single Consumer).
+		 * Batch Steal: Atomically exchange Top with Sentinel.
+		 * This detaches the entire stack and resets the arena to empty state.
+		 * Since we are the only consumer for this arena, this is safe.
 		 */
-		batch_head = sentinel->next_handle;
-		atomic_store(&sentinel->next_handle, HANDLE_NULL);
+		batch_top = atomic_exchange(&arena->top_handle, sentinel_handle);
 
 		/*
-		 * B. Reset Tail to Sentinel (Atomic Exchange)
-		 * This closes the batch at the current tail.
+		 * If we raced with a free operation, we might get sentinel.
 		 */
-		batch_tail = atomic_exchange(&arena->tail_handle, sentinel_handle);
+		if (batch_top == sentinel_handle) {
+			continue;
+		}
 
 		/*
-		 * C. Adopt the batch as the new local list.
-		 * Since local list is empty (checked at step 1), just set it.
+		 * Adopt the batch as the new local stack.
+		 * The batch is a linked list ending at Sentinel.
 		 */
-		ctx->local_free_head = batch_head;
-		ctx->local_free_tail = batch_tail;
+		ctx->local_top = batch_top;
 
-		/* Retry pop from the newly filled local list */
+		/* Retry pop from the newly filled local stack */
 		return pop_local(ctx);
 	}
 
@@ -526,7 +524,9 @@ static uint64_t alloc_slot(struct thread_context *ctx)
 }
 
 /**
- * @brief   Returns a slot to its arena (Wait-Free Push).
+ * @brief   Returns a slot to its arena (Stack Push).
+ *
+ * Uses a CAS loop to push the slot onto the top of the arena's stack.
  *
  * @param   slot: Pointer to the version slot to free.
  */
@@ -535,19 +535,21 @@ static void free_slot(struct atomsnap_version *slot)
 	uint64_t my_handle = slot->self_handle;
 	atomsnap_handle_t h = { .raw = my_handle };
 	struct memory_arena *arena = g_arena_table[h.thread_idx][h.arena_idx];
-	uint64_t prev_tail;
-	struct atomsnap_version *prev_node;
+	uint64_t old_top;
 
-	/* 1. Set Next to NULL (-1) BEFORE exposing to list */
-	atomic_store(&slot->next_handle, HANDLE_NULL);
-
-	/* 2. Swap Tail (Wait-Free Linearization Point) */
-	prev_tail = atomic_exchange(&arena->tail_handle, my_handle);
-
-	/* 3. Link Previous Node to Me */
-	/* No Branching: prev_node is valid (Sentinel or Normal Node) */
-	prev_node = resolve_handle(prev_tail);
-	atomic_store(&prev_node->next_handle, my_handle);
+	/*
+	 * CAS Loop to push onto the stack.
+	 * 1. Read current top.
+	 * 2. Set my next_handle to current top (Link New -> Old).
+	 * 3. CAS arena top to me.
+	 */
+	old_top = atomic_load(&arena->top_handle);
+	do {
+		/* Link: Me -> Old Top (Down the stack) */
+		atomic_store(&slot->next_handle, old_top);
+		
+		/* Attempt to make Me the New Top */
+	} while (!atomic_compare_exchange_weak(&arena->top_handle, &old_top, my_handle));
 }
 
 /**
@@ -605,8 +607,7 @@ static int atomsnap_thread_init_internal(void)
 		}
 		ctx->thread_id = tid;
 		ctx->current_arena_idx = -1;
-		ctx->local_free_head = HANDLE_NULL;
-		ctx->local_free_tail = HANDLE_NULL;
+		ctx->local_top = HANDLE_NULL;
 		g_thread_contexts[tid] = ctx;
 	} else {
 		/*
@@ -738,7 +739,7 @@ void atomsnap_free_version(struct atomsnap_version *version)
 		return;
 	}
 
-	if (version->gate && version->gate->free_impl) {
+	if (version->object && version->gate && version->gate->free_impl) {
 		version->gate->free_impl(version->object, version->free_context);
 	}
 
@@ -764,7 +765,7 @@ void atomsnap_set_object(struct atomsnap_version *ver, void *object,
 /**
  * @brief   Get the user payload object from a version.
  *
- * @param   ver: The version handle.
+ * @param   ver: The version pointer.
  *
  * @return  Pointer to the user object.
  */
@@ -807,14 +808,14 @@ struct atomsnap_version *atomsnap_acquire_version_slot(
 /**
  * @brief   Release a version previously acquired.
  *
- * Increments inner ref count. If 0 (meaning all readers done and writer
- * detached), frees the version.
+ * Increments inner ref count.
+ * If 0 (meaning all readers done and writer detached), frees the version.
  *
  * @param   ver: Version to release.
  */
 void atomsnap_release_version(struct atomsnap_version *ver)
 {
-	int32_t rc;
+	int64_t rc;
 
 	if (ver == NULL) {
 		return;
@@ -856,11 +857,11 @@ void atomsnap_exchange_version_slot(struct atomsnap_gate *gate, int slot_idx,
 	uint64_t old_val, old_handle;
 	uint32_t old_refs;
 	struct atomsnap_version *old_ver;
-	int32_t rc;
+	int64_t rc;
 
 	/*
 	 * Swap the handle in the control block.
-	 * The new value will have `new_handle` and `RefCount = 0` (implicitly).
+	 * The new value will have 'new_handle' and 'RefCount = 0' (implicitly).
 	 */
 	old_val = atomic_exchange_explicit(cb, new_handle, memory_order_acq_rel);
 
@@ -914,7 +915,7 @@ bool atomsnap_compare_exchange_version_slot(struct atomsnap_gate *gate,
 	uint64_t current_val, cur_handle, next_val;
 	uint32_t old_refs;
 	struct atomsnap_version *old_ver;
-	int32_t rc;
+	int64_t rc;
 
 	current_val = atomic_load_explicit(cb, memory_order_acquire);
 	cur_handle = (current_val & HANDLE_MASK_64);

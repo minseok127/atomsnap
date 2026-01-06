@@ -98,7 +98,7 @@ void atomsnap_set_object(struct atomsnap_version *ver, void *object,
 /**
  * @brief   Get the user payload object from a version.
  *
- * @param   ver: The version handle.
+ * @param   ver: The version pointer.
  *
  * @return  Pointer to the user object.
  */
