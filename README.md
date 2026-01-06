@@ -88,9 +88,9 @@ Memory is managed in Arenas, which are contiguous blocks of pre-allocated slots.
     - Wasted Space: Only 32 Bytes per arena (0.004% fragmentation).
 
 **Free List Design**:
-- Thread-local batch for fast allocation (wait-free)
-- Arena-level shared list for cross-thread recycling
-- Sentinel-based lock-free push operation
+- MPSC lock-free stack operation
+    - Thread-local batch for fast allocation (pop)
+    - Arena-level shared list for cross-thread recycling (push)
 
 ### 4. Reference Counting Algorithm
 
