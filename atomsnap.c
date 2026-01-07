@@ -56,6 +56,7 @@
 #include <pthread.h>
 #include <assert.h>
 #include <inttypes.h>
+#include <sys/mman.h>
 
 #include "atomsnap.h"
 
@@ -207,16 +208,18 @@ struct memory_arena {
 /*
  * thread_context - Thread-Local Storage (TLS) context.
  *
- * @thread_id:         Assigned global thread ID.
- * @arenas:            Array of pointers to owned arenas.
- * @local_top:         Top of the local free stack.
- * @current_arena_idx: Index of the arena currently being allocated from.
+ * @thread_id:          Assigned global thread ID.
+ * @arenas:             Array of pointers to owned arenas.
+ * @local_top:          Top of the local free stack.
+ * @active_arena_count: Index of the arena currently being allocated from.
+ * @alloc_count:        Allocation counter to trigger periodic reclamation.
  */
 struct thread_context {
 	int thread_id;
 	struct memory_arena *arenas[MAX_ARENAS_PER_THREAD];
 	uint64_t local_top;
-	int current_arena_idx;
+	int active_arena_count;
+	uint64_t alloc_count;
 };
 
 /*
@@ -378,14 +381,23 @@ static int init_arena(struct thread_context *ctx, int arena_idx)
 	struct atomsnap_version *slot;
 	int i;
 
-	arena = aligned_alloc(PAGE_SIZE, sizeof(struct memory_arena));
-	if (!arena) {
-		return -1;
-	}
-	memset(arena, 0, sizeof(struct memory_arena));
+	/*
+	 * Check if the arena pointer already exists (reclaimed/reused).
+	 * If so, we reuse the pointer and rely on madvise() having zeroed it,
+	 * or simply re-initialize the data structures.
+	 */
+	if (ctx->arenas[arena_idx] != NULL) {
+		arena = ctx->arenas[arena_idx];
+	} else {
+		arena = aligned_alloc(PAGE_SIZE, sizeof(struct memory_arena));
+		if (!arena) {
+			return -1;
+		}
+		memset(arena, 0, sizeof(struct memory_arena));
 
-	g_arena_table[tid][arena_idx] = arena;
-	ctx->arenas[arena_idx] = arena;
+		g_arena_table[tid][arena_idx] = arena;
+		ctx->arenas[arena_idx] = arena;
+	}
 
 	/* Setup Sentinel (Slot 0) */
 	sentinel_handle = construct_handle(tid, arena_idx, 0);
@@ -481,8 +493,39 @@ static uint64_t alloc_slot(struct thread_context *ctx)
 {
 	uint64_t handle;
 	struct memory_arena *arena;
-	uint64_t sentinel_handle, batch_top, curr_top;
-	int i;
+	uint64_t sentinel_handle, batch_top, curr_top, depth;
+	int i, new_idx;
+
+	/* Increment allocation counter for periodic trigger */
+	ctx->alloc_count++;
+
+	/*
+	 * Periodic Reclamation Check.
+	 * Check if the last active arena is fully free.
+	 */
+	if ((ctx->alloc_count % SLOTS_PER_ARENA) == 0) {
+		/* Only reclaim if we have more than 1 arena */
+		if (ctx->active_arena_count > 1) {
+			arena = ctx->arenas[ctx->active_arena_count - 1];
+			
+			/* Read top handle to check utilization */
+			curr_top = atomic_load(&arena->top_handle);
+			depth = (curr_top & STACK_DEPTH_MASK) >> STACK_DEPTH_SHIFT;
+
+			/*
+			 * If depth equals (SLOTS - 1), it means all slots (1..N) 
+			 * have been returned to the global stack.
+			 * Note: Slot 0 is sentinel, so count is SLOTS - 1.
+			 */
+			if (depth == (SLOTS_PER_ARENA - 1)) {
+				/* Reclaim physical memory but keep virtual address/pointer */
+				madvise(arena, sizeof(struct memory_arena), MADV_DONTNEED);
+				
+				/* Shrink the active arena stack */
+				ctx->active_arena_count--;
+			}
+		}
+	}
 
 	/* 1. Try Local Free Stack */
 	handle = pop_local(ctx);
@@ -491,7 +534,7 @@ static uint64_t alloc_slot(struct thread_context *ctx)
 	}
 
 	/* 2. Try Batch Steal from existing arenas */
-	for (i = 0; i <= ctx->current_arena_idx; i++) {
+	for (i = 0; i < ctx->active_arena_count; i++) {
 		arena = ctx->arenas[i];
 		sentinel_handle = construct_handle(ctx->thread_id, i, 0);
 
@@ -529,10 +572,10 @@ static uint64_t alloc_slot(struct thread_context *ctx)
 	}
 
 	/* 3. Allocate New Arena */
-	if (ctx->current_arena_idx < MAX_ARENAS_PER_THREAD - 1) {
-		int new_idx = ctx->current_arena_idx + 1;
+	if (ctx->active_arena_count < MAX_ARENAS_PER_THREAD - 1) {
+		new_idx = ctx->active_arena_count;
 		if (init_arena(ctx, new_idx) == 0) {
-			ctx->current_arena_idx = new_idx;
+			ctx->active_arena_count++;
 			/* Retry pop */
 			return pop_local(ctx);
 		}
@@ -608,6 +651,7 @@ static int atomsnap_thread_init_internal(void)
 
 	/* 1. Acquire Thread ID using CAS */
 	for (i = 0; i < MAX_THREADS; i++) {
+		/* Check without locking cache line first */
 		if (atomic_load(&g_tid_used[i]) == true) {
 			continue;
 		}
@@ -636,7 +680,8 @@ static int atomsnap_thread_init_internal(void)
 			return -1;
 		}
 		ctx->thread_id = tid;
-		ctx->current_arena_idx = -1;
+		ctx->active_arena_count = 0;
+		ctx->alloc_count = 0;
 		ctx->local_top = HANDLE_NULL;
 		g_thread_contexts[tid] = ctx;
 	} else {
