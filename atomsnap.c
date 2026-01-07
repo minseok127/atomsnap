@@ -318,8 +318,32 @@ static inline uint64_t construct_handle(int tid, int aid, int sid)
 static void tls_destructor(void *arg)
 {
 	struct thread_context *ctx = (struct thread_context *)arg;
-	
+	struct memory_arena *arena;
+	uint64_t curr_top, depth;
+	int i;
+
 	if (ctx) {
+		/*
+		 * Attempt to reclaim unused arenas from the last index.
+		 * If we encounter an arena that is NOT fully free, we stop immediately.
+		 * This preserves the contiguity of the active_arena_count.
+		 */
+		for (i = ctx->active_arena_count - 1; i >= 0; i--) {
+			arena = ctx->arenas[i];
+			curr_top = atomic_load(&arena->top_handle);
+			depth = (curr_top & STACK_DEPTH_MASK) >> STACK_DEPTH_SHIFT;
+
+			/* Check if arena is fully free (SLOTS - 1 because of sentinel) */
+			if (depth == (SLOTS_PER_ARENA - 1)) {
+				madvise(arena, sizeof(struct memory_arena), MADV_DONTNEED);
+				ctx->active_arena_count--;
+			} else {
+				/* Found a busy arena, stop reclamation to avoid holes */
+				break;
+			}
+		}
+
+		/* Release the Thread ID atomically */
 		atomic_store(&g_tid_used[ctx->thread_id], false);
 	}
 }
