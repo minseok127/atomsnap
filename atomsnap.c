@@ -243,7 +243,7 @@ static pthread_key_t g_tls_key;
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
 
 /* Thread ID Management */
-static bool g_tid_used[MAX_THREADS];
+static _Atomic bool g_tid_used[MAX_THREADS];
 
 /*
  * Forward Declarations
@@ -606,7 +606,7 @@ static int atomsnap_thread_init_internal(void)
 	int tid = -1;
 	int i;
 
-	/* 1. Acquire Thread ID using Global Mutex */
+	/* 1. Acquire Thread ID using CAS */
 	for (i = 0; i < MAX_THREADS; i++) {
 		if (atomic_load(&g_tid_used[i]) == true) {
 			continue;
