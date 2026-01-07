@@ -32,11 +32,16 @@
  * counter. A wraparound factor is used to correct race conditions where 
  * a reader releases the version during the exchange process.
  *
- * Free List Logic (Updated - Stack Based):
+ * Free List Logic (Stack Based):
  *
- * The free list management uses a "Lock-Free MPSC Stack" approach.
+ * The free list management uses a "Lock-Free MPSC Stack" approach with 
+ * tagged pointers to track stack depth.
  *
- * - Producers (Free): Use a CAS loop to push nodes onto the arena's
+ * - Tagged Pointers: The upper 24 bits of the 64-bit handle store the
+ *                    current stack depth (count). The lower 40 bits store
+ *                    the actual slot handle.
+ *
+ * - Producers (Free): Use a CAS loop to push node onto the arena's
  *                     'top_handle'.
  *
  * - Consumer (Alloc): Uses 'atomic_exchange' to detach the entire stack from
@@ -113,6 +118,15 @@
 #define HANDLE_NULL           (0xFFFFFFFFFFULL) /* 40-bit of 1s */
 
 /* 
+ * Handle Masking & Tagging
+ * We use the upper 24 bits of the 64-bit integer to store the stack depth.
+ */
+#define HANDLE_MASK_40        (0x000000FFFFFFFFFFULL)
+#define STACK_DEPTH_SHIFT     (40)
+#define STACK_DEPTH_MASK      (0xFFFFFF0000000000ULL)
+#define STACK_DEPTH_INC       (1ULL << STACK_DEPTH_SHIFT)
+
+/* 
  * Control Block (64-bit) 
  * Layout: [ 24-bit RefCount | 40-bit Handle ]
  */
@@ -135,6 +149,8 @@
 /*
  * 40-bit Handle Union for easier encoding/decoding.
  * Uses uint64_t to accommodate 40 bits.
+ *
+ * Note: The 'padding' field will contain the stack depth tag when present.
  */
 typedef union {
 	struct {
@@ -223,13 +239,11 @@ struct atomsnap_gate {
  */
 static struct memory_arena *g_arena_table[MAX_THREADS][MAX_ARENAS_PER_THREAD];
 static struct thread_context *g_thread_contexts[MAX_THREADS];
-
-/* Thread ID Management */
-static pthread_mutex_t g_tid_mutex = PTHREAD_MUTEX_INITIALIZER;
-static bool g_tid_used[MAX_THREADS];
-
 static pthread_key_t g_tls_key;
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
+
+/* Thread ID Management */
+static _Atomic bool g_tid_used[MAX_THREADS];
 
 /*
  * Forward Declarations
@@ -239,14 +253,16 @@ static int atomsnap_thread_init_internal(void);
 /**
  * @brief   Convert a raw handle to a version pointer.
  *
- * @param   handle_raw: The 40-bit handle.
+ * @param   handle_tagged: The 64-bit handle (potentially containing
+ *                         depth tags).
  *
  * @return  Pointer to the atomsnap_version, or NULL if invalid.
  */
-static inline struct atomsnap_version *resolve_handle(uint64_t handle_raw)
+static inline struct atomsnap_version *resolve_handle(uint64_t handle_tagged)
 {
 	atomsnap_handle_t h;
 	struct memory_arena *arena;
+	uint64_t handle_raw = handle_tagged & HANDLE_MASK_40;
 
 	if (__builtin_expect(handle_raw == HANDLE_NULL, 0)) {
 		return NULL;
@@ -301,9 +317,7 @@ static void tls_destructor(void *arg)
 	struct thread_context *ctx = (struct thread_context *)arg;
 	
 	if (ctx) {
-		pthread_mutex_lock(&g_tid_mutex);
-		g_tid_used[ctx->thread_id] = false;
-		pthread_mutex_unlock(&g_tid_mutex);
+		atomic_store(&g_tid_used[ctx->thread_id], false);
 	}
 }
 
@@ -416,7 +430,7 @@ static int init_arena(struct thread_context *ctx, int arena_idx)
  */
 static uint64_t pop_local(struct thread_context *ctx)
 {
-	uint64_t handle;
+	uint64_t handle_tagged;
 	struct atomsnap_version *slot;
 	atomsnap_handle_t h;
 
@@ -424,16 +438,21 @@ static uint64_t pop_local(struct thread_context *ctx)
 		return HANDLE_NULL;
 	}
 
+	/* 
+	 * Mask out any potential tags from the handle before checking
+	 * if it is the Sentinel.
+	 */
+	handle_tagged = ctx->local_top;
+	h.raw = handle_tagged & HANDLE_MASK_40;
+
 	/* Check if the top is the Sentinel (Slot 0) */
-	h.raw = ctx->local_top;
 	if (h.slot_idx == 0) {
 		/* Stack is empty (hit sentinel) */
 		ctx->local_top = HANDLE_NULL;
 		return HANDLE_NULL;
 	}
 
-	handle = ctx->local_top;
-	slot = resolve_handle(handle);
+	slot = resolve_handle(handle_tagged);
 
 	/*
 	 * Move top to the next node down the stack.
@@ -441,9 +460,9 @@ static uint64_t pop_local(struct thread_context *ctx)
 	ctx->local_top = atomic_load_explicit(&slot->next_handle, 
 		memory_order_relaxed);
 
-	/* Restore self_handle for Allocated state */
-	slot->self_handle = handle;
-	return handle;
+	/* Restore self_handle for Allocated state (clean 40-bit) */
+	slot->self_handle = h.raw;
+	return h.raw;
 }
 
 /**
@@ -495,7 +514,7 @@ static uint64_t alloc_slot(struct thread_context *ctx)
 		/*
 		 * If we raced with a free operation, we might get sentinel.
 		 */
-		if (batch_top == sentinel_handle) {
+		if ((batch_top & HANDLE_MASK_40) == sentinel_handle) {
 			continue;
 		}
 
@@ -535,21 +554,31 @@ static void free_slot(struct atomsnap_version *slot)
 	uint64_t my_handle = slot->self_handle;
 	atomsnap_handle_t h = { .raw = my_handle };
 	struct memory_arena *arena = g_arena_table[h.thread_idx][h.arena_idx];
-	uint64_t old_top;
+	uint64_t old_top, new_top, depth;
 
-	/*
-	 * CAS Loop to push onto the stack.
-	 * 1. Read current top.
-	 * 2. Set my next_handle to current top (Link New -> Old).
-	 * 3. CAS arena top to me.
-	 */
 	old_top = atomic_load(&arena->top_handle);
 	do {
+		/* 
+		 * 1. Extract current stack depth.
+		 */
+		depth = (old_top & STACK_DEPTH_MASK);
+
+		/* 
+		 * 2. Increment depth.
+		 */
+		depth += STACK_DEPTH_INC;
+
+		/* 
+		 * 3. Construct new top handle: [ New Depth | My Handle ] 
+		 */
+		new_top = depth | my_handle;
+
 		/* Link: Me -> Old Top (Down the stack) */
 		atomic_store(&slot->next_handle, old_top);
 		
 		/* Attempt to make Me the New Top */
-	} while (!atomic_compare_exchange_weak(&arena->top_handle, &old_top, my_handle));
+	} while (!atomic_compare_exchange_weak(&arena->top_handle,
+				&old_top, new_top));
 }
 
 /**
@@ -573,19 +602,22 @@ int atomsnap_global_init(void)
 static int atomsnap_thread_init_internal(void)
 {
 	struct thread_context *ctx;
+	bool expected = false;
 	int tid = -1;
 	int i;
 
-	/* 1. Acquire Thread ID using Global Mutex */
-	pthread_mutex_lock(&g_tid_mutex);
+	/* 1. Acquire Thread ID using CAS */
 	for (i = 0; i < MAX_THREADS; i++) {
-		if (!g_tid_used[i]) {
-			g_tid_used[i] = true;
+		if (atomic_load(&g_tid_used[i]) == true) {
+			continue;
+		}
+
+		expected = false;
+		if (atomic_compare_exchange_strong(&g_tid_used[i], &expected, true)) {
 			tid = i;
 			break;
 		}
 	}
-	pthread_mutex_unlock(&g_tid_mutex);
 
 	if (tid == -1) {
 		errmsg("Max threads limit reached (%d)\n", MAX_THREADS);
@@ -600,9 +632,7 @@ static int atomsnap_thread_init_internal(void)
 		if (ctx == NULL) {
 			errmsg("Failed to allocate thread context\n");
 			/* Rollback ID */
-			pthread_mutex_lock(&g_tid_mutex);
-			g_tid_used[tid] = false;
-			pthread_mutex_unlock(&g_tid_mutex);
+			atomic_store(&g_tid_used[tid], false);
 			return -1;
 		}
 		ctx->thread_id = tid;
