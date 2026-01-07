@@ -239,13 +239,11 @@ struct atomsnap_gate {
  */
 static struct memory_arena *g_arena_table[MAX_THREADS][MAX_ARENAS_PER_THREAD];
 static struct thread_context *g_thread_contexts[MAX_THREADS];
-
-/* Thread ID Management */
-static pthread_mutex_t g_tid_mutex = PTHREAD_MUTEX_INITIALIZER;
-static bool g_tid_used[MAX_THREADS];
-
 static pthread_key_t g_tls_key;
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
+
+/* Thread ID Management */
+static bool g_tid_used[MAX_THREADS];
 
 /*
  * Forward Declarations
@@ -319,9 +317,7 @@ static void tls_destructor(void *arg)
 	struct thread_context *ctx = (struct thread_context *)arg;
 	
 	if (ctx) {
-		pthread_mutex_lock(&g_tid_mutex);
-		g_tid_used[ctx->thread_id] = false;
-		pthread_mutex_unlock(&g_tid_mutex);
+		atomic_store(&g_tid_used[ctx->thread_id], false);
 	}
 }
 
@@ -606,19 +602,22 @@ int atomsnap_global_init(void)
 static int atomsnap_thread_init_internal(void)
 {
 	struct thread_context *ctx;
+	bool expected = false;
 	int tid = -1;
 	int i;
 
 	/* 1. Acquire Thread ID using Global Mutex */
-	pthread_mutex_lock(&g_tid_mutex);
 	for (i = 0; i < MAX_THREADS; i++) {
-		if (!g_tid_used[i]) {
-			g_tid_used[i] = true;
+		if (atomic_load(&g_tid_used[i]) == true) {
+			continue;
+		}
+
+		expected = false;
+		if (atomic_compare_exchange_strong(&g_tid_used[i], &expected, true)) {
 			tid = i;
 			break;
 		}
 	}
-	pthread_mutex_unlock(&g_tid_mutex);
 
 	if (tid == -1) {
 		errmsg("Max threads limit reached (%d)\n", MAX_THREADS);
@@ -633,9 +632,7 @@ static int atomsnap_thread_init_internal(void)
 		if (ctx == NULL) {
 			errmsg("Failed to allocate thread context\n");
 			/* Rollback ID */
-			pthread_mutex_lock(&g_tid_mutex);
-			g_tid_used[tid] = false;
-			pthread_mutex_unlock(&g_tid_mutex);
+			atomic_store(&g_tid_used[tid], false);
 			return -1;
 		}
 		ctx->thread_id = tid;
