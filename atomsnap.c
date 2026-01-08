@@ -6,15 +6,15 @@
  * objects with multiple versions using a handle-based approach.
  *
  * Design Overview:
- * - Handles: 40-bit integers composed of (Thread ID | Arena ID | Slot ID).
- * - Control Block: 64-bit atomic containing [24-bit RefCount | 40-bit Handle].
- * - Memory: Per-thread arenas with #atomsnap_version pooling.
+ * - Handles: 32-bit integers composed of (Arena ID | Slot ID).
+ * - Control Block: 64-bit atomic containing [32-bit RefCount | 32-bit Handle].
+ * - Memory: Global arena table with thread-local vector caching.
  *
  * Reference Counting Logic:
  *
  * When a reader wants to access the current version, it atomically increments
  * the outer reference counter using fetch_add(). The returned 64-bit value has
- * its lower 40-bits representing the pointer of the version whose reference
+ * its lower 32-bits representing the pointer of the version whose reference
  * count was increased.
  *
  * After finishing the use of the version, the reader must release it.
@@ -22,30 +22,22 @@
  * If the resulting inner counter is 0, it indicates that no other threads are 
  * referencing that version, so it can be freed.
  *
- * The design handles a bit-width mismatch between the Outer Reference Count 
- * (24-bit, counts acquires) and the Inner Reference Count (64-bit, counts
- * releases).
- *
- * When a writer exchanges a version, it subtracts the snapshot of "Acquires" 
- * (Outer) from the accumulated "Releases" (Inner). To do this correctly, 
- * the Inner counter is first masked to the same 24-bit domain as the Outer 
- * counter. A wraparound factor is used to correct race conditions where 
- * a reader releases the version during the exchange process.
+ * The design uses 32-bit counters for both Outer and Inner reference counts.
+ * Since the bit-widths are identical, no wraparound correction is required.
+ * We use uint32_t to rely on defined unsigned integer wrap-around behavior.
  *
  * Free List Logic (Stack Based):
  *
- * The free list management uses a "Lock-Free MPSC Stack" approach with 
- * tagged pointers to track stack depth.
+ * The free list management uses a "Lock-Free MPSC Stack" approach.
  *
- * - Tagged Pointers: The upper 24 bits of the 64-bit handle store the
- *                    current stack depth (count). The lower 40 bits store
- *                    the actual slot handle.
+ * - Tagged Pointers: The upper 32 bits of the 64-bit top_handle store the
+ * current stack depth. The lower 32 bits store the handle.
  *
  * - Producers (Free): Use a CAS loop to push node onto the arena's
- *                     'top_handle'.
+ * 'top_handle'.
  *
  * - Consumer (Alloc): Uses 'atomic_exchange' to detach the entire stack from
- *                     'top_handle' (Batch Steal).
+ * 'top_handle' (Batch Steal).
  */
 
 #define _GNU_SOURCE
@@ -68,99 +60,72 @@
 #define MAX_ARENAS_PER_THREAD (64)
 
 /*
- * MAX_THREADS: 1,048,575 (0xFFFFE + 1)
- *
- * The handle is 40 bits long, and HANDLE_NULL is defined as all 40 bits
- * being 1 (0xFFFFFFFFFF).
- *
- * This corresponds to:
- * - Slot Index:   0x3FFF  (16383)
- * - Arena Index:  0x3F    (63)
- * - Thread Index: 0xFFFFF (1048575)
- *
- * To prevent a valid handle from accidentally matching HANDLE_NULL, we must 
- * ensure that at least one field never reaches its maximum value (all 1s).
- * We restrict the Thread ID so that the maximum valid Thread ID is 0xFFFFE 
- * (1,048,574). Therefore, MAX_THREADS is set to 1,048,575.
+ * MAX_THREADS: 1,048,576 (2^20)
+ * Kept for global thread ID and context management.
  */
-#define MAX_THREADS           (1048575)
+#define MAX_THREADS           (1048576)
 
 /*
- * SLOTS_PER_ARENA: 16,383
+ * MAX_ARENAS: 1,048,576 (2^20)
+ * Corresponds to the 20-bit Arena Index.
+ */
+#define MAX_ARENAS            (1048576)
+
+/*
+ * SLOTS_PER_ARENA: 4,095
  *
  * We want the memory_arena structure to align perfectly with the page
- * boundaries to minimize memory fragmentation.
+ * boundaries (32 pages = 131,072 bytes).
  *
- * - atomsnap_version size: 40 bytes
+ * - atomsnap_version size: 32 bytes
  * - memory_arena header:   8 bytes (top_handle)
  *
- * Calculation:
- * target_pages = 160 pages
- * target_size  = 160 * 4096 = 655,360 bytes
+ * Size = 8 + (4,095 * 32) = 131,048 bytes.
+ * Remaining space = 24 bytes.
  *
- * If SLOTS = 16,384:
- * Size = 8 + (16,384 * 40) = 655,368 bytes (Overflows by 8 bytes!)
- * This forces allocation of 161 pages, wasting ~4KB.
- *
- * If SLOTS = 16,383:
- * Size = 8 + (16,383 * 40) = 655,328 bytes
- * Remaining space = 655,360 - 655,328 = 32 bytes (Fits in 160 pages).
- *
- * Thus, 16,383 is the optimal number of slots.
+ * Indices: 0 to 4094.
+ * Slot 0 is Sentinel. Slots 1..4094 are usable.
  */
-#define SLOTS_PER_ARENA       (16383)
+#define SLOTS_PER_ARENA       (4095)
 
-/* Bit layout for the 40-bit handle */
-#define HANDLE_SLOT_BITS      (14)
-#define HANDLE_ARENA_BITS     (6)
-#define HANDLE_THREAD_BITS    (20)
+/* Bit layout for the 32-bit handle */
+#define HANDLE_SLOT_BITS      (12)
+#define HANDLE_ARENA_BITS     (20)
 
 /* Special Values */
-#define HANDLE_NULL           (0xFFFFFFFFFFULL) /* 40-bit of 1s */
+#define HANDLE_NULL           (0xFFFFFFFF) /* 32-bit of 1s */
 
 /* 
- * Handle Masking & Tagging
- * We use the upper 24 bits of the 64-bit integer to store the stack depth.
+ * Handle Masking & Tagging (for 64-bit top_handle)
+ * [ Depth (32) | Handle (32) ]
  */
-#define HANDLE_MASK_40        (0x000000FFFFFFFFFFULL)
-#define STACK_DEPTH_SHIFT     (40)
-#define STACK_DEPTH_MASK      (0xFFFFFF0000000000ULL)
+#define HANDLE_MASK_32        (0x00000000FFFFFFFFULL)
+#define STACK_DEPTH_SHIFT     (32)
+#define STACK_DEPTH_MASK      (0xFFFFFFFF00000000ULL)
 #define STACK_DEPTH_INC       (1ULL << STACK_DEPTH_SHIFT)
 
-/* 
- * Control Block (64-bit) 
- * Layout: [ 24-bit RefCount | 40-bit Handle ]
- */
-#define REF_COUNT_SHIFT       (40)
-#define REF_COUNT_INC         (1ULL << REF_COUNT_SHIFT)
-#define REF_COUNT_MASK        (0xFFFFFF0000000000ULL)
-#define HANDLE_MASK_64        (0x000000FFFFFFFFFFULL)
-
 /*
- * Wraparound constants for 24-bit RefCount 
- * Used for correcting Inner RefCount (32-bit) to match Outer (24-bit) domain.
+ * Control Block (64-bit) 
+ * Layout: [ 32-bit RefCount | 32-bit Handle ]
  */
-#define WRAPAROUND_FACTOR     (0x1000000ULL)
-#define WRAPAROUND_MASK       (0xFFFFFFULL)
+#define REF_COUNT_SHIFT       (32)
+#define REF_COUNT_INC         (1ULL << REF_COUNT_SHIFT)
+#define REF_COUNT_MASK        (0xFFFFFFFF00000000ULL)
+#define HANDLE_MASK_64        (0x00000000FFFFFFFFULL)
 
 /* Error logging macro */
 #define errmsg(fmt, ...) \
 	fprintf(stderr, "[atomsnap:%d:%s] " fmt, __LINE__, __func__, ##__VA_ARGS__)
 
 /*
- * 40-bit Handle Union for easier encoding/decoding.
- * Uses uint64_t to accommodate 40 bits.
- *
- * Note: The 'padding' field will contain the stack depth tag when present.
+ * 32-bit Handle Union for easier encoding/decoding.
  */
 typedef union {
 	struct {
-		uint64_t slot_idx   : HANDLE_SLOT_BITS;
-		uint64_t arena_idx  : HANDLE_ARENA_BITS;
-		uint64_t thread_idx : HANDLE_THREAD_BITS;
-		uint64_t padding    : 24;
+		uint32_t slot_idx   : HANDLE_SLOT_BITS;
+		uint32_t arena_idx  : HANDLE_ARENA_BITS;
 	};
-	uint64_t raw;
+	uint32_t raw;
 } atomsnap_handle_t;
 
 /*
@@ -180,17 +145,17 @@ typedef union {
  * 00-08: object (8B)
  * 08-16: free_context (8B)
  * 16-24: gate (8B)
- * 24-32: inner_ref_cnt (8B, int64_t)
- * 32-40: self_handle / next_handle (8B)
+ * 24-28: inner_ref_cnt (4B)
+ * 28-32: self_handle / next_handle (4B)
  */
 struct atomsnap_version {
 	void *object;
 	void *free_context;
 	struct atomsnap_gate *gate;
-	_Atomic int64_t inner_ref_cnt;
+	_Atomic uint32_t inner_ref_cnt;
 	union {
-		uint64_t self_handle;
-		_Atomic uint64_t next_handle;
+		uint32_t self_handle;
+		_Atomic uint32_t next_handle;
 	};
 };
 
@@ -209,16 +174,20 @@ struct memory_arena {
  * thread_context - Thread-Local Storage (TLS) context.
  *
  * @thread_id:          Assigned global thread ID.
- * @arenas:             Array of pointers to owned arenas.
- * @local_top:          Top of the local free stack.
+ * @owned_arenas:       Dynamic array of pointers to owned arenas.
+ * @arena_indices:      Dynamic array of indices for owned arenas.
  * @active_arena_count: Index of the arena currently being allocated from.
+ * @vector_capacity:    Current allocated capacity of the dynamic arrays.
+ * @local_top:          Top of the local free stack.
  * @alloc_count:        Allocation counter to trigger periodic reclamation.
  */
 struct thread_context {
 	int thread_id;
-	struct memory_arena *arenas[MAX_ARENAS_PER_THREAD];
-	uint64_t local_top;
-	int active_arena_count;
+	struct memory_arena **owned_arenas;
+	uint32_t *arena_indices;
+	size_t active_arena_count;
+	size_t vector_capacity;
+	uint32_t local_top;
 	uint64_t alloc_count;
 };
 
@@ -240,13 +209,14 @@ struct atomsnap_gate {
 /*
  * Global Variables
  */
-static struct memory_arena *g_arena_table[MAX_THREADS][MAX_ARENAS_PER_THREAD];
+static struct memory_arena *g_arena_table[MAX_ARENAS];
+static _Atomic size_t g_global_arena_cnt = 0;
+
 static struct thread_context *g_thread_contexts[MAX_THREADS];
+static _Atomic bool g_tid_used[MAX_THREADS];
+
 static pthread_key_t g_tls_key;
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
-
-/* Thread ID Management */
-static _Atomic bool g_tid_used[MAX_THREADS];
 
 /*
  * Forward Declarations
@@ -256,25 +226,27 @@ static int atomsnap_thread_init_internal(void);
 /**
  * @brief   Convert a raw handle to a version pointer.
  *
- * @param   handle_tagged: The 64-bit handle (potentially containing
- *                         depth tags).
+ * @param   handle_raw: The 32-bit handle.
  *
  * @return  Pointer to the atomsnap_version, or NULL if invalid.
  */
-static inline struct atomsnap_version *resolve_handle(uint64_t handle_tagged)
+static inline struct atomsnap_version *resolve_handle(uint32_t handle_raw)
 {
 	atomsnap_handle_t h;
 	struct memory_arena *arena;
-	uint64_t handle_raw = handle_tagged & HANDLE_MASK_40;
 
 	if (__builtin_expect(handle_raw == HANDLE_NULL, 0)) {
 		return NULL;
 	}
 
 	h.raw = handle_raw;
-	
-	/* Bounds check could be added here, but omitted for speed */
-	arena = g_arena_table[h.thread_idx][h.arena_idx];
+
+	/* Bounds check */
+	if (__builtin_expect(h.arena_idx >= MAX_ARENAS, 0)) {
+		return NULL;
+	}
+
+	arena = g_arena_table[h.arena_idx];
 
 	if (__builtin_expect(arena == NULL, 0)) {
 		return NULL;
@@ -283,67 +255,92 @@ static inline struct atomsnap_version *resolve_handle(uint64_t handle_tagged)
 	return &arena->slots[h.slot_idx];
 }
 
-static inline void cpu_relax(void)
-{
-	__asm__ __volatile__("pause");
-}
-
 /**
  * @brief   Construct a handle from indices.
  *
- * @param   tid: Thread ID.
  * @param   aid: Arena ID.
  * @param   sid: Slot ID.
  *
- * @return  Combined 40-bit handle.
+ * @return  Combined 32-bit handle.
  */
-static inline uint64_t construct_handle(int tid, int aid, int sid)
+static inline uint32_t construct_handle(int aid, int sid)
 {
 	atomsnap_handle_t h;
 	h.raw = 0;
-	h.thread_idx = tid;
 	h.arena_idx = aid;
 	h.slot_idx = sid;
 	return h.raw;
 }
 
 /**
+ * @brief   Check and reclaim the last active arena if it is fully free.
+ *
+ * This function examines the last arena in the thread's active list.
+ * If all slots in that arena have been returned (based on stack depth),
+ * the arena is returned to the OS via madvise(), and the active arena count
+ * is decremented. The arena remains in the owned_arenas vector for future reuse.
+ *
+ * @param   ctx: Thread context.
+ *
+ * @return  true if an arena was reclaimed, false otherwise.
+ */
+static bool reclaim_last_arena_if_empty(struct thread_context *ctx)
+{
+	struct memory_arena *arena;
+	uint64_t curr_top, depth;
+	size_t idx;
+
+	if (ctx->active_arena_count == 0) {
+		return false;
+	}
+
+	idx = ctx->active_arena_count - 1;
+	arena = ctx->owned_arenas[idx];
+	
+	/* Read top handle to check utilization */
+	curr_top = atomic_load(&arena->top_handle);
+	depth = (curr_top & STACK_DEPTH_MASK) >> STACK_DEPTH_SHIFT;
+
+	/*
+	 * If depth equals (SLOTS - 1), it means all slots (1..N) 
+	 * have been returned to the arena's stack.
+	 */
+	if (depth == (SLOTS_PER_ARENA - 1)) {
+		madvise(arena, sizeof(struct memory_arena), MADV_DONTNEED);
+		ctx->active_arena_count--;
+		return true;
+	}
+
+	return false;
+}
+
+/**
  * @brief   TLS destructor called when a thread exits.
  *
- * We do NOT free the context or arenas here. We only release the Thread ID
- * so that a new thread can adopt this context (and its arenas).
+ * Reclaims all fully free arenas from the end of the active list
+ * and releases the thread ID.
  *
  * @param   arg: Pointer to the thread_context.
  */
 static void tls_destructor(void *arg)
 {
 	struct thread_context *ctx = (struct thread_context *)arg;
-	struct memory_arena *arena;
-	uint64_t curr_top, depth;
-	int i;
 
 	if (ctx) {
 		/*
-		 * Attempt to reclaim unused arenas from the last index.
-		 * If we encounter an arena that is NOT fully free, we stop immediately.
-		 * This preserves the contiguity of the active_arena_count.
+		 * Attempt to reclaim unused arenas from the end of the active list.
+		 * We loop until we hit a busy arena or run out of arenas.
 		 */
-		for (i = ctx->active_arena_count - 1; i >= 0; i--) {
-			arena = ctx->arenas[i];
-			curr_top = atomic_load(&arena->top_handle);
-			depth = (curr_top & STACK_DEPTH_MASK) >> STACK_DEPTH_SHIFT;
-
-			/* Check if arena is fully free (SLOTS - 1 because of sentinel) */
-			if (depth == (SLOTS_PER_ARENA - 1)) {
-				madvise(arena, sizeof(struct memory_arena), MADV_DONTNEED);
-				ctx->active_arena_count--;
-			} else {
-				/* Found a busy arena, stop reclamation to avoid holes */
+		while (ctx->active_arena_count > 0) {
+			if (!reclaim_last_arena_if_empty(ctx)) {
+				/* Found a busy arena, stop reclamation */
 				break;
 			}
 		}
 
-		/* Release the Thread ID atomically */
+		/* 
+		 * Release the Thread ID atomically so other threads can adopt this ctx
+		 */
 		atomic_store(&g_tid_used[ctx->thread_id], false);
 	}
 }
@@ -387,71 +384,145 @@ static inline struct thread_context *get_or_init_thread_context(void)
 }
 
 /**
- * @brief   Initialize a new arena.
+ * @brief   Ensure the thread-local vector has enough capacity.
  *
- * Sets up the Sentinel (slot 0) and links slots 1..N into the local free
- * list as a Stack (LIFO).
- *
- * @param   ctx:        Thread context.
- * @param   arena_idx:  Index of the arena to initialize.
+ * @param   ctx: Thread context.
  *
  * @return  0 on success, -1 on failure.
  */
-static int init_arena(struct thread_context *ctx, int arena_idx)
+static int ensure_vector_capacity(struct thread_context *ctx)
 {
-	struct memory_arena *arena;
-	int tid = ctx->thread_id;
-	uint64_t sentinel_handle, curr, next_in_stack;
+	size_t new_cap;
+	struct memory_arena **new_arenas;
+	uint32_t *new_indices;
+	size_t k;
+
+	if (ctx->active_arena_count < ctx->vector_capacity) {
+		return 0;
+	}
+
+	new_cap = ctx->vector_capacity == 0 ? 4 : ctx->vector_capacity * 2;
+	
+	new_arenas = realloc(ctx->owned_arenas,
+		new_cap * sizeof(struct memory_arena *));
+	new_indices = realloc(ctx->arena_indices,
+		new_cap * sizeof(uint32_t));
+
+	if (!new_arenas || !new_indices) {
+		errmsg("Failed to expand arena vector\n");
+		return -1;
+	}
+
+	ctx->owned_arenas = new_arenas;
+	ctx->arena_indices = new_indices;
+	
+	/* Initialize new slots to NULL */
+	for (k = ctx->vector_capacity; k < new_cap; k++) {
+		ctx->owned_arenas[k] = NULL;
+	}
+	
+	ctx->vector_capacity = new_cap;
+	return 0;
+}
+
+/**
+ * @brief   Initialize links and stack for a newly allocated/reused arena.
+ *
+ * @param   arena:      Pointer to the arena.
+ * @param   arena_idx:  Global index of the arena.
+ *
+ * @return  Handle to the top of the stack (first valid slot).
+ */
+static uint32_t setup_arena_stack(struct memory_arena *arena, size_t arena_idx)
+{
+	uint32_t sentinel_handle, curr, next_in_stack;
 	struct atomsnap_version *slot;
 	int i;
 
-	/*
-	 * Check if the arena pointer already exists (reclaimed/reused).
-	 * If so, we reuse the pointer and rely on madvise() having zeroed it,
-	 * or simply re-initialize the data structures.
-	 */
-	if (ctx->arenas[arena_idx] != NULL) {
-		arena = ctx->arenas[arena_idx];
-	} else {
-		arena = aligned_alloc(PAGE_SIZE, sizeof(struct memory_arena));
-		if (!arena) {
-			return -1;
-		}
-		memset(arena, 0, sizeof(struct memory_arena));
-
-		g_arena_table[tid][arena_idx] = arena;
-		ctx->arenas[arena_idx] = arena;
-	}
-
 	/* Setup Sentinel (Slot 0) */
-	sentinel_handle = construct_handle(tid, arena_idx, 0);
+	sentinel_handle = construct_handle(arena_idx, 0);
 	
-	/* Sentinel points to NULL (Bottom of the stack) */
+	/* Sentinel points to NULL */
 	atomic_store(&arena->slots[0].next_handle, HANDLE_NULL);
 
-	/* Arena Top initially points to Sentinel */
-	atomic_store(&arena->top_handle, sentinel_handle);
+	/* Arena Top initially points to Sentinel, Depth 0 */
+	atomic_store(&arena->top_handle, (uint64_t)sentinel_handle);
 
 	/*
-	 * Link slots 1..N sequentially to form a pre-filled stack.
-	 * Slot 1 -> Sentinel
-	 * Slot 2 -> Slot 1
-	 * ...
-	 * Slot N -> Slot N-1
-	 * Local Top -> Slot N
+	 * Link slots 1..N sequentially to form the free list stack.
 	 */
 	next_in_stack = sentinel_handle;
 
 	for (i = 1; i < SLOTS_PER_ARENA; i++) {
-		curr = construct_handle(tid, arena_idx, i);
-		slot = resolve_handle(curr);
+		curr = construct_handle(arena_idx, i);
+		slot = &arena->slots[i];
+		slot->self_handle = curr;
 		
-		/* Link current node to the node below it in the stack */
 		atomic_store(&slot->next_handle, next_in_stack);
 		next_in_stack = curr;
 	}
 
-	/* The last processed handle is the new top of the local stack */
+	return next_in_stack;
+}
+
+/**
+ * @brief   Initialize a new arena (or reuse a reclaimed one).
+ *
+ * @param   ctx: Thread context.
+ *
+ * @return  0 on success, -1 on failure.
+ */
+static int init_arena(struct thread_context *ctx)
+{
+	struct memory_arena *arena;
+	size_t arena_idx;
+	uint32_t next_in_stack;
+
+	/*
+	 * Check if we have an existing pointer in the vector beyond the
+	 * active_arena_count (which means it was reclaimed).
+	 */
+	if (ctx->active_arena_count < ctx->vector_capacity &&
+			ctx->owned_arenas[ctx->active_arena_count] != NULL) {
+		/* Reuse existing arena slot */
+		arena = ctx->owned_arenas[ctx->active_arena_count];
+		arena_idx = ctx->arena_indices[ctx->active_arena_count];
+
+	} else {
+		/* Allocate New Global Arena */
+		arena_idx = atomic_fetch_add(&g_global_arena_cnt, 1);
+		if (arena_idx >= MAX_ARENAS) {
+			errmsg("Max arenas reached\n");
+			return -1;
+		}
+
+		arena = aligned_alloc(PAGE_SIZE, sizeof(struct memory_arena));
+		if (!arena) {
+			errmsg("Memory allocation failed for new arena\n");
+			return -1;
+		}
+		memset(arena, 0, sizeof(struct memory_arena));
+
+		/* Register in global table */
+		g_arena_table[arena_idx] = arena;
+
+		/* Ensure vector capacity */
+		if (ensure_vector_capacity(ctx) != 0) {
+			/* Error message handled inside ensure_vector_capacity */
+			return -1;
+		}
+
+		ctx->owned_arenas[ctx->active_arena_count] = arena;
+		ctx->arena_indices[ctx->active_arena_count] = (uint32_t)arena_idx;
+	}
+	
+	/* Setup Stack and Links */
+	next_in_stack = setup_arena_stack(arena, arena_idx);
+
+	/* Increment active count */
+	ctx->active_arena_count++;
+
+	/* Use the new stack */
 	ctx->local_top = next_in_stack;
 
 	return 0;
@@ -464,9 +535,9 @@ static int init_arena(struct thread_context *ctx, int arena_idx)
  *
  * @return  Handle of the allocated slot, or HANDLE_NULL if empty.
  */
-static uint64_t pop_local(struct thread_context *ctx)
+static uint32_t pop_local(struct thread_context *ctx)
 {
-	uint64_t handle_tagged;
+	uint32_t handle_raw;
 	struct atomsnap_version *slot;
 	atomsnap_handle_t h;
 
@@ -474,12 +545,8 @@ static uint64_t pop_local(struct thread_context *ctx)
 		return HANDLE_NULL;
 	}
 
-	/* 
-	 * Mask out any potential tags from the handle before checking
-	 * if it is the Sentinel.
-	 */
-	handle_tagged = ctx->local_top;
-	h.raw = handle_tagged & HANDLE_MASK_40;
+	handle_raw = ctx->local_top;
+	h.raw = handle_raw;
 
 	/* Check if the top is the Sentinel (Slot 0) */
 	if (h.slot_idx == 0) {
@@ -488,15 +555,14 @@ static uint64_t pop_local(struct thread_context *ctx)
 		return HANDLE_NULL;
 	}
 
-	slot = resolve_handle(handle_tagged);
+	slot = resolve_handle(handle_raw);
 
 	/*
 	 * Move top to the next node down the stack.
 	 */
-	ctx->local_top = atomic_load_explicit(&slot->next_handle, 
-		memory_order_relaxed);
+	ctx->local_top = atomic_load(&slot->next_handle);
 
-	/* Restore self_handle for Allocated state (clean 40-bit) */
+	/* Restore self_handle for Allocated state */
 	slot->self_handle = h.raw;
 	return h.raw;
 }
@@ -507,7 +573,7 @@ static uint64_t pop_local(struct thread_context *ctx)
  * Strategy:
  * 1. Try Local Stack (pop_local).
  * 2. Try Batch Steal from Arenas (atomic_exchange).
- * 3. Init New Arena.
+ * 3. Init New Arena (or reuse).
  *
  * @param   ctx: Thread context.
  *
@@ -515,12 +581,11 @@ static uint64_t pop_local(struct thread_context *ctx)
  */
 static uint64_t alloc_slot(struct thread_context *ctx)
 {
-	uint64_t handle;
+	uint32_t handle, sentinel_handle;
 	struct memory_arena *arena;
-	uint64_t sentinel_handle, batch_top, curr_top, depth;
-	int i, new_idx;
+	uint64_t top_val, batch_top;
+	size_t i;
 
-	/* Increment allocation counter for periodic trigger */
 	ctx->alloc_count++;
 
 	/*
@@ -528,27 +593,7 @@ static uint64_t alloc_slot(struct thread_context *ctx)
 	 * Check if the last active arena is fully free.
 	 */
 	if ((ctx->alloc_count % SLOTS_PER_ARENA) == 0) {
-		/* Only reclaim if we have more than 1 arena */
-		if (ctx->active_arena_count > 1) {
-			arena = ctx->arenas[ctx->active_arena_count - 1];
-			
-			/* Read top handle to check utilization */
-			curr_top = atomic_load(&arena->top_handle);
-			depth = (curr_top & STACK_DEPTH_MASK) >> STACK_DEPTH_SHIFT;
-
-			/*
-			 * If depth equals (SLOTS - 1), it means all slots (1..N) 
-			 * have been returned to the global stack.
-			 * Note: Slot 0 is sentinel, so count is SLOTS - 1.
-			 */
-			if (depth == (SLOTS_PER_ARENA - 1)) {
-				/* Reclaim physical memory but keep virtual address/pointer */
-				madvise(arena, sizeof(struct memory_arena), MADV_DONTNEED);
-				
-				/* Shrink the active arena stack */
-				ctx->active_arena_count--;
-			}
-		}
+		reclaim_last_arena_if_empty(ctx);
 	}
 
 	/* 1. Try Local Free Stack */
@@ -557,52 +602,35 @@ static uint64_t alloc_slot(struct thread_context *ctx)
 		return handle;
 	}
 
-	/* 2. Try Batch Steal from existing arenas */
+	/* 2. Try Batch Steal from owned active arenas */
 	for (i = 0; i < ctx->active_arena_count; i++) {
-		arena = ctx->arenas[i];
-		sentinel_handle = construct_handle(ctx->thread_id, i, 0);
+		arena = ctx->owned_arenas[i];
+		sentinel_handle = construct_handle(ctx->arena_indices[i], 0);
 
-		/*
-		 * Check if there is anything to steal.
-		 * If top matches sentinel, the stack is empty (contains only sentinel).
-		 */
-		curr_top = atomic_load(&arena->top_handle);
-		if (curr_top == sentinel_handle) {
+		/* Check if empty (optimization) */
+		top_val = atomic_load(&arena->top_handle);
+		if ((uint32_t)(top_val & HANDLE_MASK_32) == sentinel_handle) {
 			continue;
 		}
 
 		/*
 		 * Batch Steal: Atomically exchange Top with Sentinel.
-		 * This detaches the entire stack and resets the arena to empty state.
-		 * Since we are the only consumer for this arena, this is safe.
+		 * This detaches the entire stack.
 		 */
-		batch_top = atomic_exchange(&arena->top_handle, sentinel_handle);
+		batch_top = atomic_exchange(
+			&arena->top_handle, (uint64_t)sentinel_handle);
 
-		/*
-		 * If we raced with a free operation, we might get sentinel.
-		 */
-		if ((batch_top & HANDLE_MASK_40) == sentinel_handle) {
-			continue;
-		}
+		assert((uint32_t)(batch_top & HANDLE_MASK_32) != sentinel_handle);
 
-		/*
-		 * Adopt the batch as the new local stack.
-		 * The batch is a linked list ending at Sentinel.
-		 */
-		ctx->local_top = batch_top;
+		/* Adopt the batch */
+		ctx->local_top = (uint32_t)(batch_top & HANDLE_MASK_32);
 
-		/* Retry pop from the newly filled local stack */
 		return pop_local(ctx);
 	}
 
-	/* 3. Allocate New Arena */
-	if (ctx->active_arena_count < MAX_ARENAS_PER_THREAD - 1) {
-		new_idx = ctx->active_arena_count;
-		if (init_arena(ctx, new_idx) == 0) {
-			ctx->active_arena_count++;
-			/* Retry pop */
-			return pop_local(ctx);
-		}
+	/* 3. Allocate New Arena (or reuse inactive) */
+	if (init_arena(ctx) == 0) {
+		return pop_local(ctx);
 	}
 
 	errmsg("Out of memory (Max arenas reached)\n");
@@ -618,30 +646,24 @@ static uint64_t alloc_slot(struct thread_context *ctx)
  */
 static void free_slot(struct atomsnap_version *slot)
 {
-	uint64_t my_handle = slot->self_handle;
+	uint32_t my_handle = slot->self_handle;
 	atomsnap_handle_t h = { .raw = my_handle };
-	struct memory_arena *arena = g_arena_table[h.thread_idx][h.arena_idx];
+	struct memory_arena *arena = g_arena_table[h.arena_idx];
 	uint64_t old_top, new_top, depth;
 
 	old_top = atomic_load(&arena->top_handle);
 	do {
-		/* 
-		 * 1. Extract current stack depth.
-		 */
+		/* 1. Extract current stack depth */
 		depth = (old_top & STACK_DEPTH_MASK);
 
-		/* 
-		 * 2. Increment depth.
-		 */
+		/* 2. Increment depth */
 		depth += STACK_DEPTH_INC;
 
-		/* 
-		 * 3. Construct new top handle: [ New Depth | My Handle ] 
-		 */
-		new_top = depth | my_handle;
+		/* 3. Construct new top handle: [ New Depth | My Handle ] */
+		new_top = depth | (uint64_t)my_handle;
 
-		/* Link: Me -> Old Top (Down the stack) */
-		atomic_store(&slot->next_handle, old_top);
+		/* Link: Me -> Old Top (Extract 32-bit handle) */
+		atomic_store(&slot->next_handle, (uint32_t)(old_top & HANDLE_MASK_32));
 		
 		/* Attempt to make Me the New Top */
 	} while (!atomic_compare_exchange_weak(&arena->top_handle,
@@ -675,7 +697,6 @@ static int atomsnap_thread_init_internal(void)
 
 	/* 1. Acquire Thread ID using CAS */
 	for (i = 0; i < MAX_THREADS; i++) {
-		/* Check without locking cache line first */
 		if (atomic_load(&g_tid_used[i]) == true) {
 			continue;
 		}
@@ -699,13 +720,12 @@ static int atomsnap_thread_init_internal(void)
 		ctx = calloc(1, sizeof(struct thread_context));
 		if (ctx == NULL) {
 			errmsg("Failed to allocate thread context\n");
-			/* Rollback ID */
 			atomic_store(&g_tid_used[tid], false);
 			return -1;
 		}
 		ctx->thread_id = tid;
 		ctx->active_arena_count = 0;
-		ctx->alloc_count = 0;
+		ctx->vector_capacity = 0;
 		ctx->local_top = HANDLE_NULL;
 		g_thread_contexts[tid] = ctx;
 	} else {
@@ -717,7 +737,6 @@ static int atomsnap_thread_init_internal(void)
 	/* 3. Set TLS */
 	if (pthread_setspecific(g_tls_key, ctx) != 0) {
 		errmsg("Failed to set TLS value\n");
-		/* Fatal error, but we leave ctx in global table for future use */
 		return -1;
 	}
 
@@ -798,7 +817,7 @@ void atomsnap_destroy_gate(struct atomsnap_gate *gate)
 struct atomsnap_version *atomsnap_make_version(struct atomsnap_gate *gate)
 {
 	struct thread_context *ctx = get_or_init_thread_context();
-	uint64_t handle;
+	uint32_t handle;
 	struct atomsnap_version *slot;
 
 	if (ctx == NULL) {
@@ -818,7 +837,7 @@ struct atomsnap_version *atomsnap_make_version(struct atomsnap_gate *gate)
 	slot->free_context = NULL;
 	slot->gate = gate;
 	
-	atomic_store_explicit(&slot->inner_ref_cnt, 0, memory_order_relaxed);
+	atomic_store(&slot->inner_ref_cnt, 0);
 
 	return slot;
 }
@@ -894,12 +913,12 @@ struct atomsnap_version *atomsnap_acquire_version_slot(
 {
 	_Atomic uint64_t *cb = get_cb_slot(gate, slot_idx);
 	uint64_t val;
-	uint64_t handle;
+	uint32_t handle;
 
 	/* Increment Reference Count (Upper 24 bits) */
 	val = atomic_fetch_add_explicit(cb, REF_COUNT_INC, memory_order_acquire);
 
-	handle = (val & HANDLE_MASK_64);
+	handle = (uint32_t)(val & HANDLE_MASK_64);
 
 	return resolve_handle(handle);
 }
@@ -914,7 +933,7 @@ struct atomsnap_version *atomsnap_acquire_version_slot(
  */
 void atomsnap_release_version(struct atomsnap_version *ver)
 {
-	int64_t rc;
+	uint32_t rc;
 
 	if (ver == NULL) {
 		return;
@@ -951,39 +970,31 @@ void atomsnap_release_version(struct atomsnap_version *ver)
 void atomsnap_exchange_version_slot(struct atomsnap_gate *gate, int slot_idx,
 	struct atomsnap_version *new_ver)
 {
-	uint64_t new_handle = new_ver ? new_ver->self_handle : HANDLE_NULL;
+	uint32_t new_handle = new_ver ? new_ver->self_handle : HANDLE_NULL;
 	_Atomic uint64_t *cb = get_cb_slot(gate, slot_idx);
-	uint64_t old_val, old_handle;
+	uint64_t old_val;
+	uint32_t old_handle;
 	uint32_t old_refs;
 	struct atomsnap_version *old_ver;
-	int64_t rc;
+	uint32_t rc;
 
 	/*
 	 * Swap the handle in the control block.
 	 * The new value will have 'new_handle' and 'RefCount = 0' (implicitly).
 	 */
-	old_val = atomic_exchange_explicit(cb, new_handle, memory_order_acq_rel);
+	old_val = atomic_exchange_explicit(cb, (uint64_t)new_handle,
+		memory_order_acq_rel);
 
-	old_handle = (old_val & HANDLE_MASK_64);
+	old_handle = (uint32_t)(old_val & HANDLE_MASK_64);
 	old_refs = (uint32_t)((old_val & REF_COUNT_MASK) >> REF_COUNT_SHIFT);
 
 	old_ver = resolve_handle(old_handle);
 	if (old_ver) {
-		/* Consider wraparound */
-		atomic_fetch_and_explicit(&old_ver->inner_ref_cnt, WRAPAROUND_MASK,
-			memory_order_relaxed);
-
-		/* Decrease inner ref counter, we expect the result is minus */
-		rc = atomic_fetch_sub_explicit(&old_ver->inner_ref_cnt, old_refs,
-			memory_order_release) - old_refs;
-
-		/* The outer counter has been wraparound, adjust inner count */
-		if (rc > 0) {
-			rc = atomic_fetch_sub_explicit(&old_ver->inner_ref_cnt,
-				WRAPAROUND_FACTOR, memory_order_relaxed) - WRAPAROUND_FACTOR;
-		}
-
-		assert(rc <= 0);
+		/*
+		 * Subtract accumulated Acquires from Inner RefCount.
+		 */
+		rc = atomic_fetch_sub_explicit(&old_ver->inner_ref_cnt,
+			(uint32_t)old_refs, memory_order_release) - (uint32_t)old_refs;
 
 		if (rc == 0) {
 			if (gate->free_impl) {
@@ -1008,16 +1019,15 @@ bool atomsnap_compare_exchange_version_slot(struct atomsnap_gate *gate,
 	int slot_idx, struct atomsnap_version *expected,
 	struct atomsnap_version *new_ver)
 {
-	uint64_t new_handle = new_ver ? new_ver->self_handle : HANDLE_NULL;
-	uint64_t exp_handle = expected ? expected->self_handle : HANDLE_NULL;
+	uint32_t new_handle = new_ver ? new_ver->self_handle : HANDLE_NULL;
+	uint32_t exp_handle = expected ? expected->self_handle : HANDLE_NULL;
 	_Atomic uint64_t *cb = get_cb_slot(gate, slot_idx);
-	uint64_t current_val, cur_handle, next_val;
-	uint32_t old_refs;
+	uint64_t current_val, next_val;
+	uint32_t cur_handle, old_refs, rc;
 	struct atomsnap_version *old_ver;
-	int64_t rc;
 
 	current_val = atomic_load_explicit(cb, memory_order_acquire);
-	cur_handle = (current_val & HANDLE_MASK_64);
+	cur_handle = (uint32_t)(current_val & HANDLE_MASK_64);
 
 	if (cur_handle != exp_handle) {
 		return false;
@@ -1026,18 +1036,13 @@ bool atomsnap_compare_exchange_version_slot(struct atomsnap_gate *gate,
 	/*
 	 * CAS Loop:
 	 * Retry if RefCount changes but Handle is still expected.
-	 *
-	 * Note: If atomic_compare_exchange_weak() fails (e.g., because concurrent
-	 * readers incremented the refcount), it automatically updates 'current_val'
-	 * with the latest value from 'cb'. This ensures the loop adapts to the
-	 * new refcount and retries, preventing livelock.
 	 */
 	while (1) {
-		if ((current_val & HANDLE_MASK_64) != exp_handle) {
+		if ((uint32_t)(current_val & HANDLE_MASK_64) != exp_handle) {
 			return false;
 		}
 
-		next_val = new_handle;
+		next_val = (uint64_t)new_handle;
 
 		if (atomic_compare_exchange_weak_explicit(cb, &current_val, next_val,
 				memory_order_acq_rel, memory_order_acquire)) {
@@ -1052,18 +1057,8 @@ bool atomsnap_compare_exchange_version_slot(struct atomsnap_gate *gate,
 		/*
 		 * Same logic with atomsnap_exchange_version_slot().
 		 */
-		atomic_fetch_and_explicit(&old_ver->inner_ref_cnt, WRAPAROUND_MASK,
-			memory_order_relaxed);
-
-		rc = atomic_fetch_sub_explicit(&old_ver->inner_ref_cnt, old_refs,
-			memory_order_release) - old_refs;
-
-		if (rc > 0) {
-			rc = atomic_fetch_sub_explicit(&old_ver->inner_ref_cnt,
-				WRAPAROUND_FACTOR, memory_order_relaxed) - WRAPAROUND_FACTOR;
-		}
-
-		assert(rc <= 0);
+		rc = atomic_fetch_sub_explicit(&old_ver->inner_ref_cnt,
+			(uint32_t)old_refs, memory_order_release) - (uint32_t)old_refs;
 
 		if (rc == 0) {
 			if (gate->free_impl) {
