@@ -973,10 +973,8 @@ void atomsnap_exchange_version_slot(struct atomsnap_gate *gate, int slot_idx,
 	uint32_t new_handle = new_ver ? new_ver->self_handle : HANDLE_NULL;
 	_Atomic uint64_t *cb = get_cb_slot(gate, slot_idx);
 	uint64_t old_val;
-	uint32_t old_handle;
-	uint32_t old_refs;
+	uint32_t old_handle, old_refs, rc;
 	struct atomsnap_version *old_ver;
-	uint32_t rc;
 
 	/*
 	 * Swap the handle in the control block.
