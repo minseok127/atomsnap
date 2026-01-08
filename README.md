@@ -1,13 +1,6 @@
 # ATOMSNAP
 
-This library is a wait-free and lock-free concurrency primitive for managing shared objects with multiple versions. It allows multiple readers and writers to access a shared pointer simultaneously without blocking, ensuring system-wide progress and low latency.
-
-### Key Features
-
-- **Wait-Free Reads**: Readers acquire object versions without blocking or spinning.
-- **Lock-Free Writes**: Writers update objects using atomic operations (TAS/CAS).
-- **Memory Safety**: Automatic garbage collection through reference counting.
-- **Version Consistency**: Readers never observe partially updated objects.
+This library is a lock-free concurrency primitive for managing shared objects with multiple versions. It allows multiple readers and writers to access a shared pointer simultaneously without blocking, ensuring system-wide progress and low latency.
 
 ### Use Cases
 
@@ -20,7 +13,7 @@ This library is a wait-free and lock-free concurrency primitive for managing sha
 2. **No Nested Acquires**: Do not acquire multiple versions without releasing previous ones.
 3. **CAS Ordering**: When using `atomsnap_compare_exchange_version()`, always call `atomsnap_release_version()` AFTER the CAS operation to prevent ABA problems.
 4. **Failed CAS Cleanup**: When CAS fails, manually free the unused version with `atomsnap_free_version()` or retry CAS with that version to prevent memory leaks.
-5. **MAX_THREADS**: This library supports a global maximum of 1,048,575 threads.
+5. **MAX_THREADS**: This library supports a global maximum of 1,048,576 threads.
 
 ---
 
@@ -57,61 +50,53 @@ The core atomic variable is a 64-bit control block that packs both the reference
 This ensures that reading the pointer and incrementing the reference count happen in a single atomic instruction.
 
 ```
-+----------------+---------------------------------------+
-| RefCount (24b) |             Handle (40b)              |
-+----------------+---------------------------------------+
-|    Acquires    |       Thread ID | Arena ID | Slot ID  |
-+----------------+---------------------------------------+
++--------------------+----------------------+
+|   RefCount (32b)   |     Handle (32b)     |
++--------------------+----------------------+
+|      Acquires      |  Arena ID | Slot ID  |
++--------------------+----------------------+
 ```
 
-- Reference Count (24-bit): Tracks the number of Acquires (active readers) for the current version.
-- Handle (40-bit): A unique identifier for the `atomsnap_version`.
+- **Reference Count (32-bit)**: Tracks the number of Acquires for the current version.
+- **Handle (32-bit)**: A unique identifier for the `atomsnap_version`.
 
-### 2. Handle Structure (40-bit)
+### 2. Handle Structure (32-bit)
 
-The 40-bit handle uniquely identifies a version slot within the global memory space.
+The 32-bit handle uniquely identifies a version slot within the global memory space.
 
-- Thread ID (20-bit): Identifies the owner thread (0 ~ 1,048,574).
-- Arena ID (6-bit): Identifies the specific arena within the thread's context (0 ~ 63).
-- Slot ID (14-bit): Identifies the slot index within the arena (0 ~ 16,382).
-
-Note: MAX_THREADS is limited to $1,048,575$ to prevent the handle from conflicting with `HANDLE_NULL` value (all bits set to 1).
+- **Arena Index (20-bit)**: Identifies the arena in the global table (0 ~ 1,048,575).
+- **Slot Index (12-bit)**: Identifies the slot index within the arena (0 ~ 4,095).
 
 ### 3. Memory Arena & Page Alignment
 
 Memory is managed in Arenas, which are contiguous blocks of pre-allocated slots.
 
-- Page Alignment: Each arena is designed to fit perfectly within 160 memory pages (4KB pages).
-- `SLOTS_PER_ARENA` is set to 16,383.
-    - Formula: $8\text{B (Header)} + (16,383 \times 40\text{B}) = 655,328\text{ Bytes}$
-    - Capacity: $160 \times 4096\text{B} = 655,360\text{ Bytes}$
-    - Wasted Space: Only 32 Bytes per arena (0.004% fragmentation).
+- **Page Alignment**: Each arena is designed to fit perfectly within **32 memory pages** (4KB pages).
+- **`SLOTS_PER_ARENA`** is set to **4,095**.
+    - Formula: $8\text{B (Header)} + (4,095 \times 32\text{B}) = 131,048\text{ Bytes}$
+    - Capacity: $32 \times 4096\text{B} = 131,072\text{ Bytes}$
+    - Wasted Space: Only **24 Bytes** per arena (0.01% fragmentation).
 
 **Free List Design**:
 - MPSC lock-free stack operation
     - Thread-local batch for fast allocation (pop)
     - Arena-level shared list for cross-thread recycling (push)
+    - Global arena table with dynamic thread-local caching
 
 ### 4. Reference Counting Algorithm
 
 Atomsnap uses a dual-counter approach to manage object lifecycles safely without locks.
 
-1. **Outer Reference Count (24-bit)**: Located in the Control Block. Counts the number of times a version has been Acquired.
+1. **Outer Reference Count (32-bit)**: Located in the Control Block (Upper 32 bits). Counts the number of times a version has been Acquired.
 2. **Inner Reference Count (32-bit)**: Located in the Version object. Counts the number of times a version has been Released.
 
 **Lifecycle**:
-1. Writer allocates version from thread-local arena.
+1. Writer allocates version from thread-local arena cache.
 2. Writer sets object and exchanges version atomically.
-3. **Readers increment outer reference count on acquire (control block).**
+3. **Readers increment outer reference count on acquire (atomic fetch_add).**
 4. **Writer decrements inner reference count on exchange (by outer count value).**
 5. **Readers increment inner reference count on release.**
 6. Version freed when inner reference count reaches zero.
-
-Since the Outer counter (24-bit) and Inner counter (32-bit) have different bit-widths, simply subtracting them would lead to errors. Atomsnap solves this with a robust normalization logic:
-
-- **Masking**: The Inner counter is masked to the 24-bit domain.
-- **Subtraction**: Active Readers = (Inner Releases - Outer Acquires).
-- **Wraparound Correction**: If the outer counter wraps around relative to the inner counter, the algorithm detects the anomaly (positive result) and applies a `WRAPAROUND_FACTOR` ($2^{24}$) correction.
 
 ---
 
