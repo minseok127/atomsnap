@@ -364,12 +364,13 @@ static void global_init_routine(void)
  */
 static inline struct thread_context *get_or_init_thread_context(void)
 {
-	struct thread_context *ctx
-		= (struct thread_context *)pthread_getspecific(g_tls_key);
+	struct thread_context *ctx = NULL;
+
+	pthread_once(&g_init_once, global_init_routine);
+
+	ctx = (struct thread_context *)pthread_getspecific(g_tls_key);
 
 	if (__builtin_expect(ctx == NULL, 0)) {
-		/* Lazy initialization */
-		pthread_once(&g_init_once, global_init_routine);
 		if (atomsnap_thread_init_internal() != 0) {
 			return NULL;
 		}
