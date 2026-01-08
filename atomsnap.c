@@ -55,11 +55,6 @@
 #define PAGE_SIZE             (4096)
 
 /*
- * Maximum number of memory arenas for each thread.
- */
-#define MAX_ARENAS_PER_THREAD (64)
-
-/*
  * MAX_THREADS: 1,048,576 (2^20)
  * Kept for global thread ID and context management.
  */
