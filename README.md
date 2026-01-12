@@ -5,7 +5,7 @@ This library is a lock-free concurrency primitive for managing shared objects wi
 ### Use Cases
 
 - Objects are too large for single atomic instructions (>8 bytes).
-- Readers require consistent snapshots without tearing.
+- Readers access immutable snapshots while writers create new versions.
 
 ## Critical Usage Rules
 
