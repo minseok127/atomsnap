@@ -911,7 +911,7 @@ struct atomsnap_version *atomsnap_acquire_version_slot(
 	uint64_t val;
 	uint32_t handle;
 
-	/* Increment Reference Count (Upper 24 bits) */
+	/* Increment Reference Count (Upper 32 bits) */
 	val = atomic_fetch_add_explicit(cb, REF_COUNT_INC, memory_order_acquire);
 
 	handle = (uint32_t)(val & HANDLE_MASK_64);
