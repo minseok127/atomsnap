@@ -943,7 +943,7 @@ void atomsnap_release_version(struct atomsnap_version *ver)
 	 * - Sum == 0 means all readers have finished and writer has detached it.
 	 */
 	rc = atomic_fetch_add_explicit(&ver->inner_ref_cnt, 1,
-		memory_order_release) + 1;
+		memory_order_acq_rel) + 1;
 
 	if (rc == 0) {
 		/* Invoke user-defined cleanup */
@@ -988,7 +988,7 @@ void atomsnap_exchange_version_slot(struct atomsnap_gate *gate, int slot_idx,
 		 * Subtract accumulated Acquires from Inner RefCount.
 		 */
 		rc = atomic_fetch_sub_explicit(&old_ver->inner_ref_cnt,
-			(uint32_t)old_refs, memory_order_release) - (uint32_t)old_refs;
+			(uint32_t)old_refs, memory_order_acq_rel) - (uint32_t)old_refs;
 
 		if (rc == 0) {
 			if (gate->free_impl) {
@@ -1052,7 +1052,7 @@ bool atomsnap_compare_exchange_version_slot(struct atomsnap_gate *gate,
 		 * Same logic with atomsnap_exchange_version_slot().
 		 */
 		rc = atomic_fetch_sub_explicit(&old_ver->inner_ref_cnt,
-			(uint32_t)old_refs, memory_order_release) - (uint32_t)old_refs;
+			(uint32_t)old_refs, memory_order_acq_rel) - (uint32_t)old_refs;
 
 		if (rc == 0) {
 			if (gate->free_impl) {
