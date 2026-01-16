@@ -849,12 +849,16 @@ struct atomsnap_version *atomsnap_make_version(struct atomsnap_gate *gate)
  */
 void atomsnap_free_version(struct atomsnap_version *version)
 {
+	void *obj;
+
 	if (version == NULL) {
 		return;
 	}
 
-	if (version->object && version->gate && version->gate->free_impl) {
-		version->gate->free_impl(version->object, version->free_context);
+	obj = atomic_load_explicit(&version->object, memory_order_relaxed);
+
+	if (version->gate && version->gate->free_impl) {
+		version->gate->free_impl(obj, version->free_context);
 	}
 
 	free_slot(version);
@@ -933,6 +937,7 @@ struct atomsnap_version *atomsnap_acquire_version_slot(
 void atomsnap_release_version(struct atomsnap_version *ver)
 {
 	uint32_t rc;
+	void *obj;
 
 	if (ver == NULL) {
 		return;
@@ -949,9 +954,11 @@ void atomsnap_release_version(struct atomsnap_version *ver)
 		memory_order_acq_rel) + 1;
 
 	if (rc == 0) {
+		obj = atomic_load_explicit(&ver->object, memory_order_relaxed);
+
 		/* Invoke user-defined cleanup */
 		if (ver->gate && ver->gate->free_impl) {
-			ver->gate->free_impl(ver->object, ver->free_context);
+			ver->gate->free_impl(obj, ver->free_context);
 		}
 
 		/* Return slot to free list */
