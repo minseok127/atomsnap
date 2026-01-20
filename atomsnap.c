@@ -18,12 +18,10 @@
  * count was increased.
  *
  * After finishing the use of the version, the reader must release it.
- * During release, the reader increments the inner reference counter by 1.
- * If the resulting inner counter is 0, it indicates that no other threads are 
- * referencing that version, so it can be freed.
+ * During release, the reader increments the inner counter.
+ * If the resulting counter is 0 and the version is detached, it can be freed.
  *
- * The design uses 32-bit counters for both Outer and Inner reference counts.
- * Since the bit-widths are identical, no wraparound correction is required.
+ * The design uses 32-bit counters for both Outer and Inner counts.
  * We use uint32_t to rely on defined unsigned integer wrap-around behavior.
  *
  * Free List Logic (Stack Based):
@@ -48,6 +46,7 @@
 #include <pthread.h>
 #include <assert.h>
 #include <inttypes.h>
+#include <stdbool.h>
 #include <sys/mman.h>
 
 #include "atomsnap.h"
@@ -67,21 +66,21 @@
 #define MAX_ARENAS            (1048576)
 
 /*
- * SLOTS_PER_ARENA: 4,095
+ * SLOTS_PER_ARENA: 3,276
  *
  * We want the memory_arena structure to align perfectly with the page
  * boundaries (32 pages = 131,072 bytes).
  *
- * - atomsnap_version size: 32 bytes
+ * - atomsnap_version size: 40 bytes
  * - memory_arena header:   8 bytes (top_handle)
  *
- * Size = 8 + (4,095 * 32) = 131,048 bytes.
+ * Size = 8 + (3,276 * 40) = 131,048 bytes.
  * Remaining space = 24 bytes.
  *
- * Indices: 0 to 4094.
- * Slot 0 is Sentinel. Slots 1..4094 are usable.
+ * Indices: 0 to 3275.
+ * Slot 0 is Sentinel. Slots 1..3275 are usable.
  */
-#define SLOTS_PER_ARENA       (4095)
+#define SLOTS_PER_ARENA       (3276)
 
 /* Bit layout for the 32-bit handle */
 #define HANDLE_SLOT_BITS      (12)
@@ -90,7 +89,7 @@
 /* Special Values */
 #define HANDLE_NULL           (0xFFFFFFFF) /* 32-bit of 1s */
 
-/* 
+/*
  * Handle Masking & Tagging (for 64-bit top_handle)
  * [ Depth (32) | Handle (32) ]
  */
@@ -100,13 +99,30 @@
 #define STACK_DEPTH_INC       (1ULL << STACK_DEPTH_SHIFT)
 
 /*
- * Control Block (64-bit) 
+ * Control Block (64-bit)
  * Layout: [ 32-bit RefCount | 32-bit Handle ]
  */
 #define REF_COUNT_SHIFT       (32)
 #define REF_COUNT_INC         (1ULL << REF_COUNT_SHIFT)
 #define REF_COUNT_MASK        (0xFFFFFFFF00000000ULL)
 #define HANDLE_MASK_64        (0x00000000FFFFFFFFULL)
+
+/*
+ * Inner State (64-bit)
+ * Layout: [ 32-bit Counter | 32-bit Flags ]
+ *
+ * - Upper 32 bits: counter (uint32_t, wraps naturally)
+ * - Lower 32 bits: flags (DETACHED / FINALIZED)
+ *
+ * Readers increment the counter only by adding (1ULL << 32), so flags are
+ * never modified by carry/overflow.
+ */
+#define INNER_CNT_SHIFT       (32)
+#define INNER_CNT_INC         (1ULL << INNER_CNT_SHIFT)
+#define INNER_FLAGS_MASK      (0x00000000FFFFFFFFULL)
+
+#define INNER_F_DETACHED      (1u << 0)
+#define INNER_F_FINALIZED     (1u << 1)
 
 /* Error logging macro */
 #define errmsg(fmt, ...) \
@@ -123,6 +139,16 @@ typedef union {
 	uint32_t raw;
 } atomsnap_handle_t;
 
+static inline uint32_t inner_cnt(uint64_t s)
+{
+	return (uint32_t)(s >> INNER_CNT_SHIFT);
+}
+
+static inline uint32_t inner_flags(uint64_t s)
+{
+	return (uint32_t)(s & INNER_FLAGS_MASK);
+}
+
 /*
  * atomsnap_version - Internal representation of a version.
  *
@@ -132,7 +158,7 @@ typedef union {
  * @object:        Public-facing pointer to the user object.
  * @free_context:  User-defined context for the free function.
  * @gate:          Pointer to the gate this version belongs to.
- * @inner_ref_cnt: Internal reference counter for reader tracking.
+ * @inner_state:   [32-bit Counter | 32-bit Flags] for reclamation.
  * @self_handle:   Handle identifying this version (when allocated).
  * @next_handle:   Handle to the next node in the stack (when freed).
  *
@@ -140,17 +166,18 @@ typedef union {
  * 00-08: object (8B)
  * 08-16: free_context (8B)
  * 16-24: gate (8B)
- * 24-28: inner_ref_cnt (4B)
- * 28-32: self_handle / next_handle (4B)
+ * 24-32: inner_state (8B)
+ * 32-36: self_handle / next_handle (4B)
+ * 36-40: padding (4B)
  */
 struct atomsnap_version {
-	_Atomic void *object;
+	_Atomic(void *) object;
 	void *free_context;
 	struct atomsnap_gate *gate;
-	_Atomic uint32_t inner_ref_cnt;
+	_Atomic(uint64_t) inner_state;
 	union {
 		uint32_t self_handle;
-		_Atomic uint32_t next_handle;
+		_Atomic(uint32_t) next_handle;
 	};
 };
 
@@ -161,7 +188,7 @@ struct atomsnap_version {
  * @slots:      Array of version structures. Slot 0 is the Sentinel.
  */
 struct memory_arena {
-	_Atomic uint64_t top_handle;
+	_Atomic(uint64_t) top_handle;
 	struct atomsnap_version slots[SLOTS_PER_ARENA];
 };
 
@@ -195,9 +222,9 @@ struct thread_context {
  * @num_extra_slots:      Number of extra slots.
  */
 struct atomsnap_gate {
-	_Atomic uint64_t control_block;
+	_Atomic(uint64_t) control_block;
 	atomsnap_free_func free_impl;
-	_Atomic uint64_t *extra_control_blocks;
+	_Atomic(uint64_t) *extra_control_blocks;
 	int num_extra_slots;
 };
 
@@ -205,10 +232,10 @@ struct atomsnap_gate {
  * Global Variables
  */
 static struct memory_arena *g_arena_table[MAX_ARENAS];
-static _Atomic size_t g_global_arena_cnt = 0;
+static _Atomic(size_t) g_global_arena_cnt = 0;
 
 static struct thread_context *g_thread_contexts[MAX_THREADS];
-static _Atomic bool g_tid_used[MAX_THREADS];
+static _Atomic(bool) g_tid_used[MAX_THREADS];
 
 static pthread_key_t g_tls_key;
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
@@ -261,6 +288,7 @@ static inline struct atomsnap_version *resolve_handle(uint32_t handle_raw)
 static inline uint32_t construct_handle(int aid, int sid)
 {
 	atomsnap_handle_t h;
+
 	h.raw = 0;
 	h.arena_idx = aid;
 	h.slot_idx = sid;
@@ -273,7 +301,7 @@ static inline uint32_t construct_handle(int aid, int sid)
  * This function examines the last arena in the thread's active list.
  * If all slots in that arena have been returned (based on stack depth),
  * the arena is returned to the OS via madvise(), and the active arena count
- * is decremented. The arena remains in the owned_arenas vector for future reuse.
+ * is decremented. The arena remains in the owned_arenas vector for reuse.
  *
  * @param   ctx: Thread context.
  *
@@ -291,13 +319,13 @@ static bool reclaim_last_arena_if_empty(struct thread_context *ctx)
 
 	idx = ctx->active_arena_count - 1;
 	arena = ctx->owned_arenas[idx];
-	
+
 	/* Read top handle to check utilization */
 	curr_top = atomic_load(&arena->top_handle);
 	depth = (curr_top & STACK_DEPTH_MASK) >> STACK_DEPTH_SHIFT;
 
 	/*
-	 * If depth equals (SLOTS - 1), it means all slots (1..N) 
+	 * If depth equals (SLOTS - 1), it means all slots (1..N)
 	 * have been returned to the arena's stack.
 	 */
 	if (depth == (SLOTS_PER_ARENA - 1)) {
@@ -323,8 +351,8 @@ static void tls_destructor(void *arg)
 
 	if (ctx) {
 		/*
-		 * Attempt to reclaim unused arenas from the end of the active list.
-		 * We loop until we hit a busy arena or run out of arenas.
+		 * Attempt to reclaim unused arenas from the end of the active
+		 * list. We loop until we hit a busy arena or run out of arenas.
 		 */
 		while (ctx->active_arena_count > 0) {
 			if (!reclaim_last_arena_if_empty(ctx)) {
@@ -333,8 +361,9 @@ static void tls_destructor(void *arg)
 			}
 		}
 
-		/* 
-		 * Release the Thread ID atomically so other threads can adopt this ctx
+		/*
+		 * Release the Thread ID atomically so other threads can adopt
+		 * this ctx.
 		 */
 		atomic_store(&g_tid_used[ctx->thread_id], false);
 	}
@@ -398,7 +427,7 @@ static int ensure_vector_capacity(struct thread_context *ctx)
 	}
 
 	new_cap = ctx->vector_capacity == 0 ? 4 : ctx->vector_capacity * 2;
-	
+
 	new_arenas = realloc(ctx->owned_arenas,
 		new_cap * sizeof(struct memory_arena *));
 	new_indices = realloc(ctx->arena_indices,
@@ -411,12 +440,12 @@ static int ensure_vector_capacity(struct thread_context *ctx)
 
 	ctx->owned_arenas = new_arenas;
 	ctx->arena_indices = new_indices;
-	
+
 	/* Initialize new slots to NULL */
 	for (k = ctx->vector_capacity; k < new_cap; k++) {
 		ctx->owned_arenas[k] = NULL;
 	}
-	
+
 	ctx->vector_capacity = new_cap;
 	return 0;
 }
@@ -437,7 +466,7 @@ static uint32_t setup_arena_stack(struct memory_arena *arena, size_t arena_idx)
 
 	/* Setup Sentinel (Slot 0) */
 	sentinel_handle = construct_handle(arena_idx, 0);
-	
+
 	/* Sentinel points to NULL */
 	atomic_store(&arena->slots[0].next_handle, HANDLE_NULL);
 
@@ -453,7 +482,7 @@ static uint32_t setup_arena_stack(struct memory_arena *arena, size_t arena_idx)
 		curr = construct_handle(arena_idx, i);
 		slot = &arena->slots[i];
 		slot->self_handle = curr;
-		
+
 		atomic_store(&slot->next_handle, next_in_stack);
 		next_in_stack = curr;
 	}
@@ -479,11 +508,10 @@ static int init_arena(struct thread_context *ctx)
 	 * active_arena_count (which means it was reclaimed).
 	 */
 	if (ctx->active_arena_count < ctx->vector_capacity &&
-			ctx->owned_arenas[ctx->active_arena_count] != NULL) {
+		ctx->owned_arenas[ctx->active_arena_count] != NULL) {
 		/* Reuse existing arena slot */
 		arena = ctx->owned_arenas[ctx->active_arena_count];
 		arena_idx = ctx->arena_indices[ctx->active_arena_count];
-
 	} else {
 		/* Allocate New Global Arena */
 		arena_idx = atomic_fetch_add(&g_global_arena_cnt, 1);
@@ -504,14 +532,14 @@ static int init_arena(struct thread_context *ctx)
 
 		/* Ensure vector capacity */
 		if (ensure_vector_capacity(ctx) != 0) {
-			/* Error message handled inside ensure_vector_capacity */
 			return -1;
 		}
 
 		ctx->owned_arenas[ctx->active_arena_count] = arena;
-		ctx->arena_indices[ctx->active_arena_count] = (uint32_t)arena_idx;
+		ctx->arena_indices[ctx->active_arena_count] =
+			(uint32_t)arena_idx;
 	}
-	
+
 	/* Setup Stack and Links */
 	next_in_stack = setup_arena_stack(arena, arena_idx);
 
@@ -613,10 +641,11 @@ static uint64_t alloc_slot(struct thread_context *ctx)
 		 * Batch Steal: Atomically exchange Top with Sentinel.
 		 * This detaches the entire stack.
 		 */
-		batch_top = atomic_exchange(
-			&arena->top_handle, (uint64_t)sentinel_handle);
+		batch_top = atomic_exchange(&arena->top_handle,
+			(uint64_t)sentinel_handle);
 
-		assert((uint32_t)(batch_top & HANDLE_MASK_32) != sentinel_handle);
+		assert((uint32_t)(batch_top & HANDLE_MASK_32) !=
+			sentinel_handle);
 
 		/* Adopt the batch */
 		ctx->local_top = (uint32_t)(batch_top & HANDLE_MASK_32);
@@ -659,11 +688,96 @@ static void free_slot(struct atomsnap_version *slot)
 		new_top = depth | (uint64_t)my_handle;
 
 		/* Link: Me -> Old Top (Extract 32-bit handle) */
-		atomic_store(&slot->next_handle, (uint32_t)(old_top & HANDLE_MASK_32));
-		
+		atomic_store(&slot->next_handle,
+			(uint32_t)(old_top & HANDLE_MASK_32));
+
 		/* Attempt to make Me the New Top */
 	} while (!atomic_compare_exchange_weak(&arena->top_handle,
-				&old_top, new_top));
+		&old_top, new_top));
+}
+
+/*
+ * Finalize and return the slot to the arena.
+ */
+static inline void finalize_and_free(struct atomsnap_version *ver)
+{
+	void *obj;
+
+	obj = atomic_load_explicit(&ver->object, memory_order_relaxed);
+
+	if (ver->gate && ver->gate->free_impl) {
+		ver->gate->free_impl(obj, ver->free_context);
+	}
+
+	free_slot(ver);
+}
+
+/*
+ * Attempt to finalize a detached version when the counter reaches zero.
+ *
+ * A thread claims FINALIZED before reclaiming. If FINALIZED is already
+ * set, another thread reclaimed it.
+ *
+ * Define ATOMSNAP_DISABLE_FINALIZE_CHECK to ignore duplicates.
+ */
+static inline void try_finalize(struct atomsnap_version *ver, uint64_t state)
+{
+	uint32_t flags;
+	uint64_t old;
+
+	flags = inner_flags(state);
+	if (!(flags & INNER_F_DETACHED)) {
+		return;
+	}
+
+	if (inner_cnt(state) != 0) {
+		return;
+	}
+
+	old = atomic_fetch_or_explicit(&ver->inner_state,
+		(uint64_t)INNER_F_FINALIZED, memory_order_acq_rel);
+
+	if ((uint32_t)old & INNER_F_FINALIZED) {
+		errmsg("Double finalize detected\n");
+		abort();
+	}
+
+	finalize_and_free(ver);
+}
+
+/*
+ * Atomically detach and subtract outer refs from the inner counter.
+ *
+ * The DETACHED flag and counter adjustment must be committed together to
+ * avoid intermediate states that could lead to premature reclamation.
+ */
+static inline void detach_and_adjust(struct atomsnap_version *ver,
+	uint32_t old_refs)
+{
+	uint64_t cur, next;
+	uint32_t cnt, flags;
+	uint32_t new_cnt, new_flags;
+
+	cur = atomic_load_explicit(&ver->inner_state, memory_order_acquire);
+
+	for (;;) {
+		cnt = inner_cnt(cur);
+		flags = inner_flags(cur);
+
+		new_cnt = (uint32_t)(cnt - old_refs);
+		new_flags = flags | INNER_F_DETACHED;
+
+		next = ((uint64_t)new_cnt << INNER_CNT_SHIFT) |
+			(uint64_t)new_flags;
+
+		if (atomic_compare_exchange_weak_explicit(&ver->inner_state,
+				&cur, next, memory_order_acq_rel,
+				memory_order_acquire)) {
+			break;
+		}
+	}
+
+	try_finalize(ver, next);
 }
 
 /**
@@ -698,7 +812,8 @@ static int atomsnap_thread_init_internal(void)
 		}
 
 		expected = false;
-		if (atomic_compare_exchange_strong(&g_tid_used[i], &expected, true)) {
+		if (atomic_compare_exchange_strong(&g_tid_used[i],
+			&expected, true)) {
 			tid = i;
 			break;
 		}
@@ -749,6 +864,7 @@ static int atomsnap_thread_init_internal(void)
 struct atomsnap_gate *atomsnap_init_gate(struct atomsnap_init_context *ctx)
 {
 	struct atomsnap_gate *gate = calloc(1, sizeof(struct atomsnap_gate));
+	int i;
 
 	if (gate == NULL) {
 		errmsg("Gate allocation failed\n");
@@ -766,16 +882,17 @@ struct atomsnap_gate *atomsnap_init_gate(struct atomsnap_init_context *ctx)
 
 	if (gate->num_extra_slots > 0) {
 		gate->extra_control_blocks = calloc(gate->num_extra_slots,
-			sizeof(_Atomic uint64_t));
-		
+			sizeof(_Atomic(uint64_t)));
+
 		if (gate->extra_control_blocks == NULL) {
 			errmsg("Extra blocks allocation failed\n");
 			free(gate);
 			return NULL;
 		}
 
-		for (int i = 0; i < gate->num_extra_slots; i++) {
-			atomic_init(&gate->extra_control_blocks[i], (uint64_t)HANDLE_NULL);
+		for (i = 0; i < gate->num_extra_slots; i++) {
+			atomic_init(&gate->extra_control_blocks[i],
+				(uint64_t)HANDLE_NULL);
 		}
 	}
 
@@ -832,8 +949,8 @@ struct atomsnap_version *atomsnap_make_version(struct atomsnap_gate *gate)
 	slot->object = NULL;
 	slot->free_context = NULL;
 	slot->gate = gate;
-	
-	atomic_store(&slot->inner_ref_cnt, 0);
+
+	atomic_store_explicit(&slot->inner_state, 0, memory_order_relaxed);
 
 	return slot;
 }
@@ -876,7 +993,8 @@ void atomsnap_set_object(struct atomsnap_version *ver, void *object,
 {
 	if (ver) {
 		ver->free_context = free_context;
-		atomic_store_explicit(&ver->object, object, memory_order_release);
+		atomic_store_explicit(&ver->object, object,
+			memory_order_release);
 	}
 }
 
@@ -890,12 +1008,14 @@ void atomsnap_set_object(struct atomsnap_version *ver, void *object,
 void *atomsnap_get_object(const struct atomsnap_version *ver)
 {
 	if (ver) {
-		return atomic_load_explicit(&ver->object, memory_order_acquire);
+		return atomic_load_explicit(&ver->object,
+			memory_order_acquire);
 	}
 	return NULL;
 }
 
-static inline _Atomic uint64_t *get_cb_slot(struct atomsnap_gate *gate, int idx)
+static inline _Atomic(uint64_t) *get_cb_slot(struct atomsnap_gate *gate,
+	int idx)
 {
 	return (idx == 0) ? &gate->control_block :
 		&gate->extra_control_blocks[idx - 1];
@@ -914,12 +1034,13 @@ static inline _Atomic uint64_t *get_cb_slot(struct atomsnap_gate *gate, int idx)
 struct atomsnap_version *atomsnap_acquire_version_slot(
 	struct atomsnap_gate *gate, int slot_idx)
 {
-	_Atomic uint64_t *cb = get_cb_slot(gate, slot_idx);
+	_Atomic(uint64_t) *cb = get_cb_slot(gate, slot_idx);
 	uint64_t val;
 	uint32_t handle;
 
 	/* Increment Reference Count (Upper 32 bits) */
-	val = atomic_fetch_add_explicit(cb, REF_COUNT_INC, memory_order_acquire);
+	val = atomic_fetch_add_explicit(cb, REF_COUNT_INC,
+		memory_order_acquire);
 
 	handle = (uint32_t)(val & HANDLE_MASK_64);
 
@@ -929,41 +1050,28 @@ struct atomsnap_version *atomsnap_acquire_version_slot(
 /**
  * @brief   Release a version previously acquired.
  *
- * Increments inner ref count.
- * If 0 (meaning all readers done and writer detached), frees the version.
+ * Increments the inner counter (upper 32 bits only).
+ * If DETACHED is set and the counter becomes 0, the version is reclaimed.
  *
  * @param   ver: Version to release.
  */
 void atomsnap_release_version(struct atomsnap_version *ver)
 {
-	uint32_t rc;
-	void *obj;
+	uint64_t prev, now;
 
 	if (ver == NULL) {
 		return;
 	}
 
 	/*
-	 * Increment inner ref count.
-	 * Logic: 
-	 * - Writer decrements by N (outer ref count at exchange time).
-	 * - Reader increments by 1 when done.
-	 * - Sum == 0 means all readers have finished and writer has detached it.
+	 * Readers increment only the counter (upper 32 bits). Flags in the
+	 * lower 32 bits are never affected by carry/overflow.
 	 */
-	rc = atomic_fetch_add_explicit(&ver->inner_ref_cnt, 1,
-		memory_order_acq_rel) + 1;
+	prev = atomic_fetch_add_explicit(&ver->inner_state, INNER_CNT_INC,
+		memory_order_acq_rel);
+	now = prev + INNER_CNT_INC;
 
-	if (rc == 0) {
-		obj = atomic_load_explicit(&ver->object, memory_order_relaxed);
-
-		/* Invoke user-defined cleanup */
-		if (ver->gate && ver->gate->free_impl) {
-			ver->gate->free_impl(obj, ver->free_context);
-		}
-
-		/* Return slot to free list */
-		free_slot(ver);
-	}
+	try_finalize(ver, now);
 }
 
 /**
@@ -977,11 +1085,10 @@ void atomsnap_exchange_version_slot(struct atomsnap_gate *gate, int slot_idx,
 	struct atomsnap_version *new_ver)
 {
 	uint32_t new_handle = new_ver ? new_ver->self_handle : HANDLE_NULL;
-	_Atomic uint64_t *cb = get_cb_slot(gate, slot_idx);
+	_Atomic(uint64_t) *cb = get_cb_slot(gate, slot_idx);
 	uint64_t old_val;
-	uint32_t old_handle, old_refs, rc;
+	uint32_t old_handle, old_refs;
 	struct atomsnap_version *old_ver;
-	void *obj;
 
 	/*
 	 * Swap the handle in the control block.
@@ -995,21 +1102,7 @@ void atomsnap_exchange_version_slot(struct atomsnap_gate *gate, int slot_idx,
 
 	old_ver = resolve_handle(old_handle);
 	if (old_ver) {
-		/*
-		 * Subtract accumulated Acquires from Inner RefCount.
-		 */
-		rc = atomic_fetch_sub_explicit(&old_ver->inner_ref_cnt,
-			(uint32_t)old_refs, memory_order_acq_rel) - (uint32_t)old_refs;
-
-		if (rc == 0) {
-			obj = atomic_load_explicit(&old_ver->object, memory_order_relaxed);
-
-			if (gate->free_impl) {
-				gate->free_impl(obj, old_ver->free_context);
-			}
-
-			free_slot(old_ver);
-		}
+		detach_and_adjust(old_ver, old_refs);
 	}
 }
 
@@ -1029,11 +1122,10 @@ bool atomsnap_compare_exchange_version_slot(struct atomsnap_gate *gate,
 {
 	uint32_t new_handle = new_ver ? new_ver->self_handle : HANDLE_NULL;
 	uint32_t exp_handle = expected ? expected->self_handle : HANDLE_NULL;
-	_Atomic uint64_t *cb = get_cb_slot(gate, slot_idx);
+	_Atomic(uint64_t) *cb = get_cb_slot(gate, slot_idx);
 	uint64_t current_val, next_val;
-	uint32_t cur_handle, old_refs, rc;
+	uint32_t cur_handle, old_refs;
 	struct atomsnap_version *old_ver;
-	void *obj;
 
 	current_val = atomic_load_explicit(cb, memory_order_acquire);
 	cur_handle = (uint32_t)(current_val & HANDLE_MASK_64);
@@ -1053,8 +1145,9 @@ bool atomsnap_compare_exchange_version_slot(struct atomsnap_gate *gate,
 
 		next_val = (uint64_t)new_handle;
 
-		if (atomic_compare_exchange_weak_explicit(cb, &current_val, next_val,
-				memory_order_acq_rel, memory_order_acquire)) {
+		if (atomic_compare_exchange_weak_explicit(cb, &current_val,
+			next_val, memory_order_acq_rel,
+			memory_order_acquire)) {
 			break;
 		}
 	}
@@ -1063,22 +1156,9 @@ bool atomsnap_compare_exchange_version_slot(struct atomsnap_gate *gate,
 
 	old_ver = resolve_handle(exp_handle);
 	if (old_ver) {
-		/*
-		 * Same logic with atomsnap_exchange_version_slot().
-		 */
-		rc = atomic_fetch_sub_explicit(&old_ver->inner_ref_cnt,
-			(uint32_t)old_refs, memory_order_acq_rel) - (uint32_t)old_refs;
-
-		if (rc == 0) {
-			obj = atomic_load_explicit(&old_ver->object, memory_order_relaxed);
-
-			if (gate->free_impl) {
-				gate->free_impl(obj, old_ver->free_context);
-			}
-
-			free_slot(old_ver);
-		}
+		detach_and_adjust(old_ver, old_refs);
 	}
 
 	return true;
 }
+
