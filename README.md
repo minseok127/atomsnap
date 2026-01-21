@@ -2,7 +2,7 @@
 
 This library is a lock-free concurrency primitive for managing shared objects with multiple versions. It allows multiple readers and writers to access a shared pointer simultaneously without blocking, ensuring system-wide progress and low latency.
 
-### Use Cases
+## Use Cases
 
 - Objects are too large for single atomic instructions (>8 bytes).
 - Readers access immutable snapshots while writers create new versions.
