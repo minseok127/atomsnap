@@ -9,11 +9,16 @@ This library is a lock-free concurrency primitive for managing shared objects wi
 
 ## Critical Usage Rules
 
-1. **Acquire-Release Pairing**: Every `atomsnap_acquire_version()` must have a matching `atomsnap_release_version()`.
-2. **No Nested Acquires**: Do not acquire multiple versions without releasing previous ones.
-3. **CAS Ordering**: When using `atomsnap_compare_exchange_version()`, always call `atomsnap_release_version()` AFTER the CAS operation to prevent ABA problems.
-4. **Failed CAS Cleanup**: When CAS fails, manually free the unused version with `atomsnap_free_version()` or retry CAS with that version to prevent memory leaks.
-5. **MAX_THREADS**: This library supports a global maximum of 1,048,576 threads.
+**[Planned]: Features or constraints targeted for optimization or removal in future releases.**
+
+- **MAX_THREADS**: This library supports a global maximum of 1,048,576 threads.
+
+**[Fixed]: Permanent architectural constraints or safety policies that will remain unchanged.**
+
+- **Acquire-Release Pairing**: Every `atomsnap_acquire_version()` must have a matching `atomsnap_release_version()`.
+- **No Nested Acquires**: Do not acquire multiple versions without releasing previous ones.
+- **CAS Ordering**: When using `atomsnap_compare_exchange_version()`, always call `atomsnap_release_version()` AFTER the CAS operation to prevent ABA problems.
+- **Failed CAS Cleanup**: When CAS fails, manually free the unused version with `atomsnap_free_version()` or retry CAS with that version to prevent memory leaks.
 
 ---
 
@@ -69,13 +74,24 @@ The 32-bit handle uniquely identifies a version slot within the global memory sp
 
 ### 3. Memory Arena & Page Alignment
 
-Memory is managed in Arenas, which are contiguous blocks of pre-allocated slots.
+Memory is managed in Arenas, which are contiguous blocks of pre-allocated
+version slots.
 
-- **Page Alignment**: Each arena is designed to fit perfectly within **32 memory pages** (4KB pages).
-- **`SLOTS_PER_ARENA`** is set to **4,095**.
-    - Formula: $8\text{B (Header)} + (4,095 \times 32\text{B}) = 131,048\text{ Bytes}$
-    - Capacity: $32 \times 4096\text{B} = 131,072\text{ Bytes}$
-    - Wasted Space: Only **24 Bytes** per arena (0.01% fragmentation).
+- **Page Alignment**: Each arena is designed to fit within **32 memory pages**
+  (4KB pages).
+- `SLOTS_PER_ARENA` is chosen based on `sizeof(atomsnap_version)`.
+
+Example (current layout):
+- `sizeof(atomsnap_version) = 40 bytes`
+- `memory_arena` header: `8 bytes` (top_handle)
+
+Formula:
+- `8B + (3,276 * 40B) = 131,048B`
+- `32 * 4096B = 131,072B`
+- Wasted: `24B` per arena
+
+> Note: `SLOTS_PER_ARENA` may change if the internal version layout changes,
+> while maintaining the 32-page arena goal.
 
 **Free List Design**:
 - MPSC lock-free stack operation
@@ -83,20 +99,46 @@ Memory is managed in Arenas, which are contiguous blocks of pre-allocated slots.
     - Arena-level shared list for cross-thread recycling (push)
     - Global arena table with dynamic thread-local caching
 
-### 4. Reference Counting Algorithm
+### 4. Reference Counting Logic
 
-Atomsnap uses a dual-counter approach to manage object lifecycles safely without locks.
+Atomsnap uses a dual-layer accounting scheme:
 
-1. **Outer Reference Count (32-bit)**: Located in the Control Block (Upper 32 bits). Counts the number of times a version has been Acquired.
-2. **Inner Reference Count (32-bit)**: Located in the Version object. Counts the number of times a version has been Released.
+- **Outer RefCount (32-bit)** lives in the Gate's Control Block
+  (upper 32 bits of a 64-bit atomic). Each acquire increments this value.
+
+- **Inner State (64-bit)** lives in each Version:
+  `[32-bit Counter | 32-bit Flags]`.
+
+Readers increment **only the counter** (upper 32 bits) on release, so the
+lower 32-bit flags are never affected by carry/overflow.
+
+When a writer publishes a new version (exchange / CAS success), it **detaches**
+the old version and **atomically adjusts** the inner counter by subtracting the
+accumulated outer refcount. A version is eligible for reclamation only when:
+
+- `DETACHED` flag is set, and
+- inner counter becomes `0`.
+
+Reclamation is claimed via a `FINALIZED` flag to guarantee the free callback
+runs exactly once even under contention.
+
+> Note: The 32-bit counters can wrap around by definition, but wrap-around
+> cannot cause premature reclamation because reclamation is gated by DETACHED
+> and finalized via FINALIZED.
+
+### 5. Reclamation Algorithm (Outer RefCount + Inner State)
 
 **Lifecycle**:
-1. Writer allocates version from thread-local arena cache.
-2. Writer sets object and exchanges version atomically.
-3. **Readers increment outer reference count on acquire (atomic fetch_add).**
-4. **Writer decrements inner reference count on exchange (by outer count value).**
-5. **Readers increment inner reference count on release.**
-6. Version freed when inner reference count reaches zero.
+
+1. Writer allocates a version from the arena.
+2. Writer sets the payload pointer and publishes it via exchange / CAS.
+3. Readers acquire the current version by incrementing the outer refcount in a
+   single atomic instruction.
+4. After publishing, the writer detaches the old version and atomically adjusts
+   its inner counter by subtracting the accumulated outer refcount.
+5. Readers release by incrementing the inner counter (upper 32 bits only).
+6. When `DETACHED && counter == 0`, a thread claims `FINALIZED` and runs the
+   free callback exactly once, then returns the slot to the arena.
 
 ---
 
@@ -410,21 +452,19 @@ Writers use unconditional exchange.
 
 | Readers/Writers | std::shared_ptr | atomsnap   | urcu (memb)  |
 |:---------------:|:---------------:|:----------:|:------------:|
-| 1/1             | 4,118,869       | 10,539,615 | 22,938,519   |
-| 2/2             | 3,919,675       | 11,581,923 | 75,880,492   |
-| 4/4             | 3,157,681       | 16,109,132 | 153,899,850  |
-| 8/8             | 2,421,110       | 20,080,344 | 265,617,635  |
-| 16/16           | 2,914,017       | 19,259,084 | 382,315,056  |
+| 1/1             | 4,118,869       | 8,867,808  | 22,938,519   |
+| 2/2             | 3,919,675       | 10,974,547 | 75,880,492   |
+| 4/4             | 3,157,681       | 14,354,099 | 153,899,850  |
+| 8/8             | 2,421,110       | 16,246,219 | 265,617,635  |
 
 ### Writer Throughput (ops/sec)
 
 | Readers/Writers | std::shared_ptr | atomsnap  | urcu (memb) |
 |:---------------:|:---------------:|:---------:|:-----------:|
-| 1/1             | 2,290,178       | 4,991,670 | 327,205     |
-| 2/2             | 1,874,746       | 6,179,567 | 130,919     |
-| 4/4             | 1,419,709       | 7,662,326 | 98,408      |
-| 8/8             | 1,122,508       | 8,455,437 | 58,712      |
-| 16/16           | 1,356,290       | 8,430,472 | 3,763       |
+| 1/1             | 2,290,178       | 4,206,934 | 327,205     |
+| 2/2             | 1,874,746       | 5,623,703 | 130,919     |
+| 4/4             | 1,419,709       | 6,646,504 | 98,408      |
+| 8/8             | 1,122,508       | 7,416,587 | 58,712      |
 
 ## Benchmark 2: Stateful CAS (16 bytes)
 
@@ -434,21 +474,19 @@ Writers use conditional exchange with retry.
 
 | Readers/Writers | shared_mutex | shared_ptr | spinlock   | atomsnap   | urcu (memb) |
 |:---------------:|:------------:|:----------:|:----------:|:----------:|:-----------:|
-| 1/1             | 483,073      | 4,168,734  | 13,861,844 | 10,826,805 | 22,389,676  |
-| 2/2             | 10,806,981   | 3,790,341  | 7,474,572  | 12,206,183 | 75,936,437  |
-| 4/4             | 13,945,730   | 3,082,837  | 4,546,094  | 16,014,367 | 158,888,978 |
-| 8/8             | 17,149,214   | 2,567,489  | 4,055,162  | 21,752,519 | 276,082,043 |
-| 16/16           | 17,000,505   | 2,372,081  | 1,608,919  | 21,136,514 | 377,963,931 |
+| 1/1             | 483,073      | 4,168,734  | 13,861,844 | 8,701,174  | 22,389,676  |
+| 2/2             | 10,806,981   | 3,790,341  | 7,474,572  | 10,893,707 | 75,936,437  |
+| 4/4             | 13,945,730   | 3,082,837  | 4,546,094  | 15,158,793 | 158,888,978 |
+| 8/8             | 17,149,214   | 2,567,489  | 4,055,162  | 18,533,507 | 276,082,043 |
 
 ### Writer Throughput (ops/sec)
 
 | Readers/Writers | shared_mutex | shared_ptr | spinlock   | atomsnap  | urcu (memb) |
 |:---------------:|:------------:|:----------:|:----------:|:---------:|:-----------:|
-| 1/1             | 395,415      | 2,152,445  | 13,621,219 | 4,846,002 | 317,286     |
-| 2/2             | 150,856      | 1,444,993  | 5,589,843  | 3,898,993 | 131,496     |
-| 4/4             | 27,958       | 1,103,961  | 3,962,019  | 2,859,683 | 95,164      |
-| 8/8             | 8,882        | 528,600    | 2,639,648  | 2,036,134 | 61,349      |
-| 16/16           | 11           | 693,230    | 1,639,855  | 2,079,865 | 3,811       |
+| 1/1             | 395,415      | 2,152,445  | 13,621,219 | 4,352,176 | 317,286     |
+| 2/2             | 150,856      | 1,444,993  | 5,589,843  | 3,761,673 | 131,496     |
+| 4/4             | 27,958       | 1,103,961  | 3,962,019  | 2,894,568 | 95,164      |
+| 8/8             | 8,882        | 528,600    | 2,639,648  | 2,091,873 | 61,349      |
 
 ## Benchmark 3: Unbalanced Workloads (CAS, 16 bytes)
 
@@ -458,14 +496,14 @@ Tests extreme reader/writer ratios.
 
 | Metric          | shared_mutex | shared_ptr | spinlock | atomsnap  | urcu (memb) |
 |:----------------|:------------:|:----------:|:--------:|:---------:|:-----------:|
-| Reader ops/sec  | 8,620,295    | 234,983    | 347,163  | 2,641,064 | 40,273,630  |
-| Writer ops/sec  | 630,098      | 1,618,858  | 6,251,655| 2,978,112 | 108,184     |
+| Reader ops/sec  | 8,620,295    | 234,983    | 347,163  | 2,374,780 | 40,273,630  |
+| Writer ops/sec  | 630,098      | 1,618,858  | 6,251,655| 2,957,111 | 108,184     |
 
 ### Configuration: 16 Readers, 1 Writer
 
 | Metric          | shared_mutex | shared_ptr | spinlock  | atomsnap   | urcu (memb) |
 |:----------------|:------------:|:----------:|:---------:|:----------:|:-----------:|
-| Reader ops/sec  | 18,221,686   | 5,208,506  | 5,079,128 | 39,537,409 | 354,783,087 |
-| Writer ops/sec  | 1            | 129,827    | 328,145   | 635,998    | 49,727      |
+| Reader ops/sec  | 18,221,686   | 5,208,506  | 5,079,128 | 36,763,930 | 354,783,087 |
+| Writer ops/sec  | 1            | 129,827    | 328,145   | 517,201    | 49,727      |
 
 ---
