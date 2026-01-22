@@ -607,7 +607,7 @@ Config:
     create backlog and memory traffic; `atomsnap` pays per-op atomic refcount cost
     but stays stable in memory.
 
-### Experiment B: Writer rate limiting sweep (payload=64, cs=0)
+### Experiment B: Writer rate limiting sweep (payload=64, cs=200ns)
 
 Config:
 - readers=16, writers=1, duration=15s
