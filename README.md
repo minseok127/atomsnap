@@ -440,8 +440,6 @@ atomsnap_release_version(ver2);
 
 ## Benchmark 1: atomsnap vs shared_ptr (16 bytes)
 
-### How Benchmark 1 works
-
 This benchmark measures the overhead of publishing and reading a "current
 version" under contention. Writers publish new immutable versions into a
 single shared slot, while readers repeatedly acquire the current version,
