@@ -570,7 +570,7 @@ Config:
 - updates/s = unlimited (writer runs as fast as it can)
 - payload=64 bytes
 - async reclamation for urcu (call_rcu), normal atomsnap reclamation
-- cs delay: 0us, 10us, 100us
+- critical-section(cs) delay: 0us, 10us, 100us
 - reported as Mops/s and MB
 
 #### A-1) shards=1
@@ -611,9 +611,9 @@ Config:
 
 Config:
 - readers=16, writers=1, duration=15s
-- cs_ns = 0 (no simulated CS work)
+- critical-section(cs) delay = 200ns
 - payload=64 bytes
-- updates/s throttled: 100k, 500k, 1M, 2M (and unlimited)
+- updates/s throttled: 100k, 500k, 1M, 2M, and unlimited
 - goal: isolate memory effects when the writer is intentionally paced
 
 #### B-1) shards=1
