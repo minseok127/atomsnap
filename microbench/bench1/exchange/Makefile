@@ -7,7 +7,7 @@ SP_SRCS		:= shared_ptr_example.cpp
 ATOM_TARGET	:= atomsnap_example
 ATOM_SRCS	:= atomsnap_example.cpp
 
-LDFLAGS	+= -L../..
+LDFLAGS	+= -L../../..
 LDLIBS	+= -latomsnap 
 
 all: $(SP_TARGET) $(ATOM_TARGET)

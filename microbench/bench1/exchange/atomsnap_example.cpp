@@ -8,7 +8,7 @@
 #include <barrier>
 #include <iomanip>
 
-#include "../../atomsnap.h"
+#include "../../../atomsnap.h"
 
 std::atomic<size_t> total_writer_ops{0};
 std::atomic<size_t> total_reader_ops{0};
@@ -29,9 +29,8 @@ void writer(std::barrier<> &sync) {
 	sync.arrive_and_wait();
 	auto start = std::chrono::steady_clock::now();
 	size_t ops = 0;
-	struct atomsnap_version *new_version = atomsnap_make_version(gate);
-	Data *new_data = new Data;
-	atomsnap_set_object(new_version, new_data, NULL);
+	struct atomsnap_version *new_version;
+	int values[2];
 
 	while (true) {
 		auto now = std::chrono::steady_clock::now();
@@ -44,18 +43,19 @@ void writer(std::barrier<> &sync) {
 
 		struct atomsnap_version *old_version = atomsnap_acquire_version(gate);
 		auto old_data = static_cast<Data*>(atomsnap_get_object(old_version));
+		
+		values[0] = old_data->value1 + 1;
+		values[1] = old_data->value2 + 1;
+		
+		new_version = atomsnap_make_version(gate);
+		
+		Data *new_data = new Data{values[0], values[1]};
+		atomsnap_set_object(new_version, new_data, NULL);
 
-		new_data->value1 = old_data->value1 + 1;
-		new_data->value2 = old_data->value2 + 1;
-
-		if (atomsnap_compare_exchange_version(gate,
-				old_version, new_version)) {
-			ops++;
-			new_version = atomsnap_make_version(gate);
-			new_data = new Data;
-			atomsnap_set_object(new_version, new_data, NULL);
-		}
+		atomsnap_exchange_version(gate, new_version);
 		atomsnap_release_version(old_version);
+
+		ops++;
 	}
 
 	total_writer_ops.fetch_add(ops, std::memory_order_relaxed);
@@ -66,7 +66,6 @@ void reader(std::barrier<> &sync) {
 	auto start = std::chrono::steady_clock::now();
 	size_t ops = 0;
 	struct atomsnap_version *current_version;
-	int64_t prev_value = 0;
 
 	while (true) {
 		auto now = std::chrono::steady_clock::now();
@@ -81,15 +80,9 @@ void reader(std::barrier<> &sync) {
 		Data *d = static_cast<Data*>(atomsnap_get_object(current_version));
 		if (d->value1 != d->value2) {
 			fprintf(stderr, "Invalid data, value1: %ld, value2: %ld\n",
-				d->value1, d->value2);
+					d->value1, d->value2);
 			exit(1);
 		}
-		if (d->value1 < prev_value) {
-			fprintf(stderr, "Invalid value, prev: %ld, now: %ld\n",
-					prev_value, d->value1);
-			exit(1);
-		}
-		prev_value = d->value1;
 		atomsnap_release_version(current_version);
 
 		ops++;

@@ -13,7 +13,7 @@ MTX_SRCS	:= mutex_example.cpp
 SPIN_TARGET	:= spinlock_example
 SPIN_SRCS	:= spinlock_example.cpp
 
-LDFLAGS	+= -L../..
+LDFLAGS	+= -L../../..
 LDLIBS	+= -latomsnap 
 
 all: $(SP_TARGET) $(ATOM_TARGET) $(MTX_TARGET) $(SPIN_TARGET)
