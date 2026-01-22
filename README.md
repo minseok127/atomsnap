@@ -506,4 +506,134 @@ Tests extreme reader/writer ratios.
 | Reader ops/sec  | 18,221,686   | 5,208,506  | 5,079,128 | 36,763,930 |
 | Writer ops/sec  | 1            | 129,827    | 328,145   | 517,201    |
 
+## Benchmark 4: atomsnap vs liburcu (RCU, urcu-memb)
+
+This benchmark compares atomsnap (refcount + bounded arena reuse) against
+Userspace RCU (liburcu, memb flavor) under a single-writer / many-readers
+workload. The goal is to quantify the trade-offs between:
+
+- **Read-side cost** (fast path overhead)
+- **Write-side cost** (publish + reclamation pressure)
+- **Memory behavior** (peak RSS under reader stalls / deferred frees)
+
+### What "payload" means
+
+`payload` is the size (bytes) of the user data copied/initialized per update.
+It models the cost of producing a new immutable snapshot. Larger payload means
+more per-update work and more memory traffic.
+
+### What "shards" means
+
+`shards` is the number of independent version chains. Readers/writers map to a
+shard (e.g., by thread id / hash) to reduce cache-line contention on a single
+shared pointer / control block.
+
+- atomsnap: uses multi-slot gates (multiple control blocks).
+- urcu: uses an array of `Data*` pointers, one per shard.
+
+### Output columns (CSV)
+
+- `r_ops_s`: reader ops/sec (measured actual throughput)
+- `w_ops_s`: writer ops/sec (measured actual throughput)
+- `lat_avg_ns`: average per-op overhead in ns (excluding the simulated CS delay)
+- `peak_rss_kb`: process peak RSS (KB)
+
+### Experiment A: Reader critical-section delay sweep (payload=64)
+
+Config:
+- readers=16, writers=1, duration=15s
+- updates/s = unlimited (writer runs as fast as it can)
+- payload=64 bytes
+- async reclamation for urcu (call_rcu), normal atomsnap reclamation
+- cs delay: 0us, 10us, 100us
+- reported as Mops/s and MB
+
+#### A-1) shards=1
+
+| CS(us) | urcu r(M/s) | urcu w(M/s) | urcu RSS(MB) | urcu lat(us) | atomsnap r(M/s) | atomsnap w(M/s) | atomsnap RSS(MB) | atomsnap lat(us) |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 28.68 | 0.545 | 12.9 | 0.085 | 27.37 | 0.428 | 20.6 | 0.475 |
+| 10 | 1.69 | 2.832 | 94.4 | 9.666 | 1.77 | 3.879 | 20.6 | 9.361 |
+| 100 | 0.18 | 3.063 | 94.0 | 86.819 | 0.18 | 5.763 | 20.8 | 88.186 |
+
+#### A-2) shards=8
+
+| CS(us) | urcu r(M/s) | urcu w(M/s) | urcu RSS(MB) | urcu lat(us) | atomsnap r(M/s) | atomsnap w(M/s) | atomsnap RSS(MB) | atomsnap lat(us) |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 48.29 | 0.751 | 18.5 | 0.099 | 35.42 | 0.632 | 20.8 | 0.237 |
+| 10 | 1.73 | 2.929 | 78.0 | 9.310 | 1.74 | 3.806 | 20.6 | 9.303 |
+| 100 | 0.18 | 3.145 | 129.9 | 87.458 | 0.18 | 5.833 | 20.8 | 90.497 |
+
+**How to read Experiment A**
+
+- **CS=0us (pure overhead)**:
+  - urcu has a very cheap read-side fast path and scales strongly with sharding.
+  - atomsnap is also fast, but has a higher per-op overhead due to refcounting.
+
+- **CS grows (10us/100us)**:
+  - urcu peak RSS rises significantly: long reader CS delays the grace period,
+    so callbacks accumulate and memory pressure grows.
+  - atomsnap peak RSS stays almost flat (~20–21MB in these runs), because freed
+    slots are recycled through arenas and reclamation is tied to refcount drain.
+
+- **Writer throughput under stalls**:
+  - with long CS, atomsnap shows higher w_ops_s than urcu in these runs.
+    Intuition: urcu’s async callback path is fast, but prolonged grace periods
+    create backlog and memory traffic; atomsnap pays per-op atomic refcount cost
+    but stays stable in memory.
+
+---
+
+### Experiment B: Writer rate limiting sweep (payload=64, cs=0)
+
+Config:
+- readers=16, writers=1, duration=15s
+- cs_ns = 0 (no simulated CS work)
+- payload=64 bytes
+- updates/s throttled: 100k, 500k, 1M, 2M (and unlimited)
+- goal: isolate memory effects when the writer is intentionally paced
+
+#### B-1) shards=1
+
+| updates/s | urcu r(M/s) | urcu w(M/s) | urcu lat(us) | urcu RSS(MB) | atomsnap r(M/s) | atomsnap w(M/s) | atomsnap lat(us) | atomsnap RSS(MB) |
+|---|---|---|---|---|---|---|---|---|
+| unlimited | 31.22 | 1.339 | 0.438 | 34.5 | 20.54 | 0.711 | 0.772 | 20.6 |
+| 100k | 34.43 | 0.100 | 0.415 | 5.0 | 16.45 | 0.100 | 0.873 | 20.5 |
+| 500k | 32.82 | 0.500 | 0.415 | 18.9 | 20.89 | 0.500 | 0.675 | 20.6 |
+| 1M | 21.58 | 0.868 | 0.588 | 17.0 | 20.29 | 0.680 | 0.746 | 20.6 |
+| 2M | 20.98 | 0.903 | 0.585 | 26.0 | 20.78 | 0.646 | 0.699 | 20.8 |
+
+#### B-2) shards=8
+
+| updates/s | urcu r(M/s) | urcu w(M/s) | urcu lat(us) | urcu RSS(MB) | atomsnap r(M/s) | atomsnap w(M/s) | atomsnap lat(us) | atomsnap RSS(MB) |
+|---|---|---|---|---|---|---|---|---|
+| unlimited | 23.66 | 1.237 | 0.561 | 31.8 | 17.85 | 0.832 | 0.675 | 20.8 |
+| 100k | 22.57 | 0.100 | 0.571 | 5.4 | 29.09 | 0.100 | 0.482 | 20.6 |
+| 500k | 24.34 | 0.500 | 0.605 | 17.0 | 28.31 | 0.500 | 0.527 | 20.6 |
+| 1M | 30.91 | 0.994 | 0.473 | 28.1 | 20.38 | 0.843 | 0.631 | 20.6 |
+| 2M | 21.65 | 0.847 | 0.571 | 26.5 | 20.69 | 0.903 | 0.622 | 20.6 |
+
+**How to read Experiment B**
+
+- Rate limiting largely removes the “writer outruns reclamation” effect for urcu:
+  at low update rates (100k/s), urcu RSS drops sharply.
+- atomsnap RSS is relatively flat across rates in these runs, reflecting the
+  arena reuse behavior.
+- Throughput can shift with sharding: with `shards=8` and throttled writer,
+  atomsnap readers become very strong at 100k–500k updates/s, consistent with
+  reduced contention on a single hot control block.
+
+---
+
+### Summary: Practical trade-offs
+
+- If your priority is **maximum read throughput** and you can tolerate memory
+  growth under long reader critical sections, **urcu** is hard to beat.
+- If you care about **predictable memory** (stable RSS) and **bounded behavior**
+  under reader stalls, **atomsnap** is attractive, at the cost of higher
+  read-side overhead (refcounting) and slightly higher baseline latency.
+- `shards` is worth enabling on both: it usually reduces contention and can
+  materially improve throughput, but it also changes cache locality and may
+  shift the optimal point depending on update rate and CPU topology.
+
 ---
