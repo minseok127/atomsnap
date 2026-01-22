@@ -452,8 +452,8 @@ validate a simple invariant, and release it.
 
 **Invariant**
 - Readers must observe `value1 == value2` at all times.
-- In CAS-style tests, readers also check that `value1` never moves backward
-  (**monotonicity**), detecting lost/rolled-back updates.
+- In CAS-style tests, readers also check that value is monotonic—i.e., 
+  it never decreases relative to any previously observed value—detecting lost/rolled-back updates.
 
 **Measurement**
 - All threads start together via a barrier.
