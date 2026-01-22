@@ -438,7 +438,7 @@ atomsnap_release_version(ver2);
 - **Compiler**: GCC 13.3.0
 - **Duration**: 100 seconds per test
 
-## Benchmark 1: atomsnap vs shared_ptr-family (16 bytes)
+## Benchmark 1: atomsnap vs shared_ptr (16 bytes)
 
 ### How Benchmark 1 works
 
