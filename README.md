@@ -121,15 +121,15 @@ Reclamation is claimed via a `FINALIZED` flag to guarantee the free callback
 runs exactly once even under contention.
 
 > Note: The 32-bit counters can wrap around by definition, but wrap-around
-> cannot cause premature reclamation because reclamation is gated by DETACHED
-> and finalized via FINALIZED.
+> cannot cause premature reclamation because reclamation is gated by `DETACHED`
+> and finalized via `FINALIZED`.
 
 ### 5. Reclamation Algorithm (Outer RefCount + Inner State)
 
 **Lifecycle**:
 
 1. Writer allocates a version from the arena.
-2. Writer sets the payload pointer and publishes it via exchange / CAS.
+2. Writer sets the payload pointer and publishes it via `exchange` / `CAS`.
 3. Readers acquire the current version by incrementing the outer refcount in a
    single atomic instruction.
 4. After publishing, the writer detaches the old version and atomically adjusts
@@ -502,8 +502,8 @@ Tests extreme reader/writer ratios.
 
 ## Benchmark 4: atomsnap vs liburcu (RCU, urcu-memb)
 
-This benchmark compares atomsnap (refcount + bounded arena reuse) against
-Userspace RCU (liburcu, memb flavor) under a single-writer / many-readers
+This benchmark compares `atomsnap` (refcount + bounded arena reuse) against
+**Userspace RCU** (`liburcu`, `memb` flavor) under a single-writer / many-readers
 workload. The goal is to quantify the trade-offs between:
 
 - **Read-side cost** (fast path overhead)
@@ -522,8 +522,8 @@ more per-update work and more memory traffic.
 shard (e.g., by thread id / hash) to reduce cache-line contention on a single
 shared pointer / control block.
 
-- atomsnap: uses multi-slot gates (multiple control blocks).
-- urcu: uses an array of `Data*` pointers, one per shard.
+- `atomsnap`: uses multi-slot gates (multiple control blocks).
+- `urcu`: uses an array of `Data*` pointers, one per shard.
 
 ### Output columns (CSV)
 
@@ -561,19 +561,19 @@ Config:
 **How to read Experiment A**
 
 - **CS=0us (pure overhead)**:
-  - urcu has a very cheap read-side fast path and scales strongly with sharding.
-  - atomsnap is also fast, but has a higher per-op overhead due to refcounting.
+  - `urcu` has a very cheap read-side fast path and scales strongly with sharding.
+  - `atomsnap` is also fast, but has a higher per-op overhead due to refcounting.
 
 - **CS grows (10us/100us)**:
-  - urcu peak RSS rises significantly: long reader CS delays the grace period,
+  - `urcu` peak RSS rises significantly: long reader CS delays the grace period,
     so callbacks accumulate and memory pressure grows.
-  - atomsnap peak RSS stays almost flat (~20–21MB in these runs), because freed
+  - `atomsnap` peak RSS stays almost flat (~20–21MB in these runs), because freed
     slots are recycled through arenas and reclamation is tied to refcount drain.
 
 - **Writer throughput under stalls**:
-  - with long CS, atomsnap shows higher w_ops_s than urcu in these runs.
-    Intuition: urcu’s async callback path is fast, but prolonged grace periods
-    create backlog and memory traffic; atomsnap pays per-op atomic refcount cost
+  - with long CS, `atomsnap` shows higher `w_ops_s` than `urcu` in these runs.
+    `urcu`’s async callback path is fast, but prolonged grace periods
+    create backlog and memory traffic; `atomsnap` pays per-op atomic refcount cost
     but stays stable in memory.
 
 ### Experiment B: Writer rate limiting sweep (payload=64, cs=0)
@@ -607,9 +607,9 @@ Config:
 
 **How to read Experiment B**
 
-- Rate limiting largely removes the “writer outruns reclamation” effect for urcu:
-  at low update rates (100k/s), urcu RSS drops sharply.
-- atomsnap RSS is relatively flat across rates in these runs, reflecting the
+- Rate limiting largely removes the “writer outruns reclamation” effect for `urcu`:
+  at low update rates (100k/s), `urcu` RSS drops sharply.
+- `atomsnap` RSS is relatively flat across rates in these runs, reflecting the
   arena reuse behavior.
 - Throughput can shift with sharding: with `shards=8` and throttled writer,
   atomsnap readers become very strong at 100k–500k updates/s, consistent with
