@@ -438,11 +438,46 @@ atomsnap_release_version(ver2);
 - **Compiler**: GCC 13.3.0
 - **Duration**: 100 seconds per test
 
-## Benchmark 1: Stateless TAS (16 bytes)
+## Benchmark 1: atomsnap vs shared_ptr-family (16 bytes)
 
-Writers use unconditional exchange.
+### How Benchmark 1 works
 
-### Reader Throughput (ops/sec)
+This benchmark measures the overhead of publishing and reading a "current
+version" under contention. Writers publish new immutable versions into a
+single shared slot, while readers repeatedly acquire the current version,
+validate a simple invariant, and release it.
+
+**Payload**
+- `struct Data { int64_t value1; int64_t value2; }` (16 bytes)
+
+**Invariant**
+- Readers must observe `value1 == value2` at all times.
+- In CAS-style tests, readers also check that `value1` never moves backward
+  (**monotonicity**), detecting lost/rolled-back updates.
+
+**Measurement**
+- All threads start together via a barrier.
+- Each thread runs for a fixed duration and counts loop iterations:
+  - Reader op: acquire → read/verify → release
+  - Writer op:
+    - TAS: one successful publish (exchange)
+    - CAS: one successful publish (compare_exchange); failed attempts do not
+      count as ops
+
+**Baselines**
+
+In addition to `atomsnap`, the benchmark includes common baselines:
+
+- `std::shared_ptr` (refcount-based shared ownership)
+- `shared_mutex` (readers share-lock; writers exclusive-lock; CAS-style baseline)
+- `spinlock` (exclusive lock for both readers and writers; CAS-style baseline)
+
+These baselines help interpret whether performance differences come from
+refcount contention, lock contention, or publish semantics.
+
+### Experiment A: TAS (unconditional exchange)
+
+Reader Throughput (ops/sec)
 
 | Readers/Writers | std::shared_ptr | atomsnap   |
 |:---------------:|:---------------:|:----------:|
@@ -451,7 +486,7 @@ Writers use unconditional exchange.
 | 4/4             | 3,157,681       | 14,354,099 |
 | 8/8             | 2,421,110       | 16,246,219 |
 
-### Writer Throughput (ops/sec)
+Writer Throughput (ops/sec)
 
 | Readers/Writers | std::shared_ptr | atomsnap  |
 |:---------------:|:---------------:|:---------:|
@@ -460,11 +495,9 @@ Writers use unconditional exchange.
 | 4/4             | 1,419,709       | 6,646,504 |
 | 8/8             | 1,122,508       | 7,416,587 |
 
-## Benchmark 2: Stateful CAS (16 bytes)
+### Experiment B: CAS (conditional compare_exchange with retry)
 
-Writers use conditional exchange with retry.
-
-### Reader Throughput (ops/sec)
+Reader Throughput (ops/sec)
 
 | Readers/Writers | shared_mutex | shared_ptr | spinlock   | atomsnap   |
 |:---------------:|:------------:|:----------:|:----------:|:----------:|
@@ -473,7 +506,7 @@ Writers use conditional exchange with retry.
 | 4/4             | 13,945,730   | 3,082,837  | 4,546,094  | 15,158,793 |
 | 8/8             | 17,149,214   | 2,567,489  | 4,055,162  | 18,533,507 |
 
-### Writer Throughput (ops/sec)
+Writer Throughput (ops/sec)
 
 | Readers/Writers | shared_mutex | shared_ptr | spinlock   | atomsnap  |
 |:---------------:|:------------:|:----------:|:----------:|:---------:|
@@ -482,25 +515,23 @@ Writers use conditional exchange with retry.
 | 4/4             | 27,958       | 1,103,961  | 3,962,019  | 2,894,568 |
 | 8/8             | 8,882        | 528,600    | 2,639,648  | 2,091,873 |
 
-## Benchmark 3: Unbalanced Workloads (CAS, 16 bytes)
+### Experiment C: Unbalanced workloads (CAS)
 
-Tests extreme reader/writer ratios.
-
-### Configuration: 1 Reader, 16 Writers
+Configuration: 1 Reader, 16 Writers
 
 | Metric          | shared_mutex | shared_ptr | spinlock | atomsnap  |
 |:----------------|:------------:|:----------:|:--------:|:---------:|
 | Reader ops/sec  | 8,620,295    | 234,983    | 347,163  | 2,374,780 |
 | Writer ops/sec  | 630,098      | 1,618,858  | 6,251,655| 2,957,111 |
 
-### Configuration: 16 Readers, 1 Writer
+Configuration: 16 Readers, 1 Writer
 
 | Metric          | shared_mutex | shared_ptr | spinlock  | atomsnap   |
 |:----------------|:------------:|:----------:|:---------:|:----------:|
 | Reader ops/sec  | 18,221,686   | 5,208,506  | 5,079,128 | 36,763,930 |
 | Writer ops/sec  | 1            | 129,827    | 328,145   | 517,201    |
 
-## Benchmark 4: atomsnap vs liburcu (RCU, urcu-memb)
+## Benchmark 2: atomsnap vs liburcu (RCU, urcu-memb)
 
 This benchmark compares `atomsnap` (refcount + bounded arena reuse) against
 **Userspace RCU** (`liburcu`, `memb` flavor) under a single-writer / many-readers
