@@ -2,12 +2,12 @@
 
 This library is a lock-free concurrency primitive for managing shared objects with multiple versions. It allows multiple readers and writers to access a shared pointer simultaneously without blocking, ensuring system-wide progress and low latency.
 
-## Use Cases
+# Use Cases
 
 - Objects are too large for single atomic instructions (>8 bytes).
 - Readers access immutable snapshots while writers create new versions.
 
-## Critical Usage Rules
+# Critical Usage Rules
 
 **[Planned]: Features or constraints targeted for optimization or removal in future releases.**
 
@@ -19,8 +19,6 @@ This library is a lock-free concurrency primitive for managing shared objects wi
 - **No Nested Acquires**: Do not acquire multiple versions without releasing previous ones.
 - **CAS Ordering**: When using `atomsnap_compare_exchange_version()`, always call `atomsnap_release_version()` AFTER the CAS operation to prevent ABA problems.
 - **Failed CAS Cleanup**: When CAS fails, manually free the unused version with `atomsnap_free_version()` or retry CAS with that version to prevent memory leaks.
-
----
 
 # Build
 ```bash
@@ -229,8 +227,6 @@ Configuration for gate initialization.
 **`bool atomsnap_compare_exchange_version_slot(atomsnap_gate *gate, int slot_idx, atomsnap_version *expected, atomsnap_version *new_ver)`**
 - CAS operation on specified slot
 
----
-
 # Usage Guide
 
 ## Basic Example
@@ -355,8 +351,6 @@ atomsnap_version *ver_slot1 = atomsnap_acquire_version_slot(gate, 1);
 atomsnap_exchange_version_slot(gate, 0, new_version0);
 atomsnap_exchange_version_slot(gate, 1, new_version1);
 ```
-
----
 
 # Common Pitfalls
 
@@ -582,8 +576,6 @@ Config:
     create backlog and memory traffic; atomsnap pays per-op atomic refcount cost
     but stays stable in memory.
 
----
-
 ### Experiment B: Writer rate limiting sweep (payload=64, cs=0)
 
 Config:
@@ -622,8 +614,6 @@ Config:
 - Throughput can shift with sharding: with `shards=8` and throttled writer,
   atomsnap readers become very strong at 100k–500k updates/s, consistent with
   reduced contention on a single hot control block.
-
----
 
 ### Summary: Practical trade-offs
 
