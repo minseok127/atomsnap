@@ -14,20 +14,28 @@
  * - Each allocating thread owns an arena (ThreadArena)
  * - Allocation: local list -> bulk steal from shared list -> new
  * - Deallocation: CAS push to owner thread's shared list (MPSC)
+ *
+ * Memory layout:
+ * ┌──────────────────────┬─────────────────────────────┐
+ * │  PoolBlock (header)  │     User Data (returned)    │
+ * │  next + owner_tid    │                             │
+ * └──────────────────────┴─────────────────────────────┘
+ *                         ↑ returned pointer
  */
 
-struct PoolNode {
-	PoolNode* next;
+struct PoolBlock {
+	PoolBlock* next;
 	uint32_t owner_tid;
+	uint32_t _pad;  // align to 16 bytes
 };
+static_assert(sizeof(PoolBlock) == 16, "PoolBlock should be 16 bytes");
 
 struct ThreadArena {
-	std::atomic<PoolNode*> shared_head{nullptr};  // MPSC: others push here
-	PoolNode* local_head = nullptr;                // only owner accesses
+	std::atomic<PoolBlock*> shared_head{nullptr};  // MPSC: others push here
+	PoolBlock* local_head = nullptr;                // only owner accesses
 };
 
-template <typename T>
-struct ArenaPool {
+struct GlobalArenaPool {
 	static constexpr int kMaxThreads = 128;
 	static inline std::atomic<uint32_t> tid_counter{0};
 	static inline ThreadArena arenas[kMaxThreads];
@@ -41,10 +49,6 @@ struct ArenaPool {
 			tid_initialized = true;
 		}
 		return my_tid;
-	}
-
-	static inline ThreadArena& my_arena() {
-		return arenas[get_tid()];
 	}
 };
 
@@ -62,32 +66,30 @@ struct PoolAllocator {
 			return static_cast<T*>(::operator new(n * sizeof(T)));
 		}
 
-		using Pool = ArenaPool<T>;
-		ThreadArena& arena = Pool::my_arena();
+		using Pool = GlobalArenaPool;
+		uint32_t my_tid = Pool::get_tid();
+		ThreadArena& arena = Pool::arenas[my_tid];
 
 		// 1. Pop from local list
 		if (arena.local_head) {
-			PoolNode* node = arena.local_head;
-			arena.local_head = node->next;
-			return reinterpret_cast<T*>(node);
+			PoolBlock* block = arena.local_head;
+			arena.local_head = block->next;
+			return reinterpret_cast<T*>(block + 1);  // return data part
 		}
 
 		// 2. Bulk steal from shared list (atomic_exchange)
-		PoolNode* stolen = arena.shared_head.exchange(
+		PoolBlock* stolen = arena.shared_head.exchange(
 			nullptr, std::memory_order_acquire);
 		if (stolen) {
 			arena.local_head = stolen->next;
-			return reinterpret_cast<T*>(stolen);
+			return reinterpret_cast<T*>(stolen + 1);  // return data part
 		}
 
 		// 3. Allocate new
-		std::size_t sz = sizeof(T);
-		if (sz < sizeof(PoolNode)) {
-			sz = sizeof(PoolNode);
-		}
-		PoolNode* node = static_cast<PoolNode*>(::operator new(sz));
-		node->owner_tid = Pool::get_tid();
-		return reinterpret_cast<T*>(node);
+		std::size_t sz = sizeof(PoolBlock) + sizeof(T);
+		PoolBlock* block = static_cast<PoolBlock*>(::operator new(sz));
+		block->owner_tid = my_tid;
+		return reinterpret_cast<T*>(block + 1);  // return data part
 	}
 
 	void deallocate(T* p, std::size_t n) {
@@ -99,17 +101,19 @@ struct PoolAllocator {
 			return;
 		}
 
-		using Pool = ArenaPool<T>;
-		PoolNode* node = reinterpret_cast<PoolNode*>(p);
-		ThreadArena& owner_arena = Pool::arenas[node->owner_tid];
+		// Get block header from user pointer
+		PoolBlock* block = reinterpret_cast<PoolBlock*>(p) - 1;
+		uint32_t owner_tid = block->owner_tid;
+
+		ThreadArena& owner_arena = GlobalArenaPool::arenas[owner_tid];
 
 		// CAS push to owner's shared list (MPSC pattern)
-		PoolNode* head = owner_arena.shared_head.load(
+		PoolBlock* head = owner_arena.shared_head.load(
 			std::memory_order_relaxed);
 		do {
-			node->next = head;
+			block->next = head;
 		} while (!owner_arena.shared_head.compare_exchange_weak(
-			head, node,
+			head, block,
 			std::memory_order_release,
 			std::memory_order_relaxed));
 	}
