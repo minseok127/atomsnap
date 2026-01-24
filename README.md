@@ -450,8 +450,8 @@ atomsnap_release_version(ver2);
 **Measurement**
 - All threads start together via a barrier.
 - Reader op: acquire → read/verify → release.
-- Writer op (TAS): one exchange operation.
-- Writer op (CAS): one successful compare_exchange; failed attempts are not counted.
+- Writer op (TAS): one `exchange` operation.
+- Writer op (CAS): one successful `compare_exchange`; failed attempts are not counted.
 - Throughput = total ops / duration.
 
 **Baselines**
@@ -487,9 +487,9 @@ Writer Throughput (ops/sec)
 
 **Observations (TAS)**
 
-- atomsnap reader throughput increases with thread count (8.9M → 16.2M). shared_ptr reader throughput decreases (4.6M → 2.8M).
-- atomsnap writer throughput increases with thread count (4.2M → 7.4M). shared_ptr writer throughput decreases (2.2M → 1.2M).
-- At 8/8 configuration, atomsnap achieves 5.8x reader throughput and 6.2x writer throughput compared to shared_ptr.
+- `atomsnap` reader throughput increases with thread count (8.9M → 16.2M). `shared_ptr` reader throughput decreases (4.6M → 2.8M).
+- `atomsnap` writer throughput increases with thread count (4.2M → 7.4M). `shared_ptr` writer throughput decreases (2.2M → 1.2M).
+- At 8/8 configuration, `atomsnap` achieves 5.8x reader throughput and 6.2x writer throughput compared to `shared_ptr`.
 
 ### Experiment B: CAS (conditional compare_exchange with retry)
 
@@ -513,11 +513,11 @@ Writer Throughput (ops/sec)
 
 **Observations (CAS)**
 
-- Reader throughput at 1/1: spinlock (13.9M) > atomsnap (8.7M) > shared_ptr (4.3M) > shared_mutex (0.5M).
-- Reader throughput at 8/8: atomsnap (18.5M) > shared_mutex (17.1M) > spinlock (4.1M) > shared_ptr (2.3M).
-- Writer throughput: spinlock is highest across all configurations. At 8/8: spinlock (2.6M) > atomsnap (2.1M) > shared_ptr (1.1M) > shared_mutex (0.009M).
-- spinlock reader throughput decreases from 13.9M to 4.1M as thread count increases. atomsnap and shared_mutex reader throughput increase.
-- shared_mutex writer throughput drops to near-zero (8,882 ops/sec) at 8/8 due to writer starvation under read-heavy contention.
+- Reader throughput at 1/1: `spinlock` (13.9M) > `atomsnap` (8.7M) > `shared_ptr` (4.3M) > `shared_mutex` (0.5M).
+- Reader throughput at 8/8: `atomsnap` (18.5M) > `shared_mutex` (17.1M) > `spinlock` (4.1M) > `shared_ptr` (2.3M).
+- Writer throughput: `spinlock` is highest across all configurations. At 8/8: `spinlock` (2.6M) > `atomsnap` (2.1M) > `shared_ptr` (1.1M) > `shared_mutex` (0.009M).
+- `spinlock` reader throughput decreases from 13.9M to 4.1M as thread count increases. `atomsnap` and `shared_mutex` reader throughput increase.
+- `shared_mutex` writer throughput drops to near-zero (8,882 ops/sec) at 8/8 due to writer starvation under read-heavy contention.
 
 ### Experiment C: Unbalanced workloads (CAS)
 
@@ -537,10 +537,10 @@ Configuration: 16 Readers, 1 Writer
 
 **Observations (Unbalanced)**
 
-- 1R/16W: shared_mutex provides highest reader throughput (8.6M) due to reader priority in rwlock semantics. spinlock provides highest writer throughput (6.3M).
-- 16R/1W: atomsnap provides highest reader throughput (36.8M), 2x higher than the next (shared_mutex 18.2M). atomsnap also provides highest writer throughput (517K).
-- shared_mutex writer throughput drops to 1 op/sec at 16R/1W, indicating complete writer starvation.
-- spinlock and shared_ptr show similar reader throughput (~5M) at 16R/1W.
+- 1R/16W: `shared_mutex` provides highest reader throughput (8.6M) due to reader priority in `rwlock` semantics. `spinlock` provides highest writer throughput (6.3M).
+- 16R/1W: `atomsnap` provides highest reader throughput (36.8M), 2x higher than the next (`shared_mutex` 18.2M). `atomsnap` also provides highest writer throughput (517K).
+- `shared_mutex` writer throughput drops to 1 op/sec at 16R/1W, indicating complete writer starvation.
+- `spinlock` and `shared_ptr` show similar reader throughput (~5M) at 16R/1W.
 
 ### Benchmark 1 Summary
 
@@ -609,22 +609,22 @@ Config:
 **Observations (Experiment A)**
 
 Read-side overhead (CS=0us):
-- urcu read latency: 0.085us (shards=1), 0.099us (shards=8).
-- atomsnap read latency: 0.475us (shards=1), 0.237us (shards=8).
-- urcu read-side overhead is 5.6x lower than atomsnap at shards=1.
-- urcu reader throughput: 28.7M (shards=1) → 48.3M (shards=8), a 1.7x increase.
-- atomsnap reader throughput: 27.4M (shards=1) → 35.4M (shards=8), a 1.3x increase.
+- `urcu` read latency: 0.085us (shards=1), 0.099us (shards=8).
+- `atomsnap` read latency: 0.475us (shards=1), 0.237us (shards=8).
+- `urcu` read-side overhead is 5.6x lower than `atomsnap` at shards=1.
+- `urcu` reader throughput: 28.7M (shards=1) → 48.3M (shards=8), a 1.7x increase.
+- `atomsnap` reader throughput: 27.4M (shards=1) → 35.4M (shards=8), a 1.3x increase.
 
 Memory usage under reader stalls:
-- urcu RSS at CS=0us: 12.9MB (shards=1), 18.5MB (shards=8).
-- urcu RSS at CS=100us: 94.0MB (shards=1), 129.9MB (shards=8).
-- atomsnap RSS: 20.6–20.8MB across all CS values and shard configurations.
-- urcu RSS increases 7.3x (shards=1) and 7.0x (shards=8) as CS increases from 0us to 100us.
-- atomsnap RSS remains constant regardless of CS delay.
+- `urcu` RSS at CS=0us: 12.9MB (shards=1), 18.5MB (shards=8).
+- `urcu` RSS at CS=100us: 94.0MB (shards=1), 129.9MB (shards=8).
+- `atomsnap` RSS: 20.6–20.8MB across all CS values and shard configurations.
+- `urcu` RSS increases 7.3x (shards=1) and 7.0x (shards=8) as CS increases from 0us to 100us.
+- `atomsnap` RSS remains constant regardless of CS delay.
 
 Writer throughput under reader stalls:
-- At CS=100us (shards=1): atomsnap 5.76M/s, urcu 3.06M/s. atomsnap is 1.9x higher.
-- At CS=100us (shards=8): atomsnap 5.83M/s, urcu 3.15M/s. atomsnap is 1.9x higher.
+- At CS=100us (shards=1): `atomsnap` 5.76M/s, `urcu` 3.06M/s. `atomsnap` is 1.9x higher.
+- At CS=100us (shards=8): `atomsnap` 5.83M/s, `urcu` 3.15M/s. `atomsnap` is 1.9x higher.
 
 ### Experiment B: Writer rate limiting sweep
 
@@ -657,16 +657,16 @@ Config:
 **Observations (Experiment B)**
 
 Memory usage vs update rate:
-- urcu RSS at 100k updates/s: 5.0MB (shards=1), 5.4MB (shards=8).
-- urcu RSS at unlimited: 34.5MB (shards=1), 31.8MB (shards=8).
-- atomsnap RSS: 20.5–20.8MB across all update rates.
-- urcu RSS varies by 6.9x between 100k and unlimited (shards=1). atomsnap RSS is constant.
+- `urcu` RSS at 100k updates/s: 5.0MB (shards=1), 5.4MB (shards=8).
+- `urcu` RSS at unlimited: 34.5MB (shards=1), 31.8MB (shards=8).
+- `atomsnap` RSS: 20.5–20.8MB across all update rates.
+- `urcu` RSS varies by 6.9x between 100k and unlimited (shards=1). `atomsnap` RSS is constant.
 
 Reader throughput vs update rate (shards=8):
-- urcu at 100k: 22.6M/s. urcu at unlimited: 23.7M/s.
-- atomsnap at 100k: 29.1M/s. atomsnap at unlimited: 17.9M/s.
-- atomsnap reader throughput is 1.3x higher than urcu at 100k updates/s.
-- urcu reader throughput is 1.3x higher than atomsnap at unlimited updates/s.
+- `urcu` at 100k: 22.6M/s. `urcu` at unlimited: 23.7M/s.
+- `atomsnap` at 100k: 29.1M/s. `atomsnap` at unlimited: 17.9M/s.
+- `atomsnap` reader throughput is 1.3x higher than `urcu` at 100k updates/s.
+- `urcu` reader throughput is 1.3x higher than `atomsnap` at unlimited updates/s.
 
 ### Benchmark 2 Summary
 
@@ -681,7 +681,7 @@ Reader throughput vs update rate (shards=8):
 | RSS variation with update rate | 5.0–34.5MB | 20.5–20.8MB |
 
 Trade-offs:
-- **urcu**: Lower read-side latency (5.6x lower than atomsnap at shards=1). Higher reader throughput at CS=0us (1.4x higher at shards=8). Memory usage increases with reader critical section length and update rate.
+- **urcu**: Lower read-side latency (5.6x lower than `atomsnap` at shards=1). Higher reader throughput at CS=0us (1.4x higher at shards=8). Memory usage increases with reader critical section length and update rate.
 - **atomsnap**: Higher read-side latency due to atomic refcount operations. Constant memory usage regardless of reader critical section length or update rate. Higher writer throughput when readers hold versions for extended periods (1.9x higher at CS=100us).
 
 ---
