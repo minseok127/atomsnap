@@ -8,25 +8,45 @@
 #include <thread>
 #include <vector>
 
-struct Node {
-	Node* next;
+/*
+ * Arena-style PoolAllocator (matching atomsnap's memory management pattern)
+ *
+ * - Each allocating thread owns an arena (ThreadArena)
+ * - Allocation: local list -> bulk steal from shared list -> new
+ * - Deallocation: CAS push to owner thread's shared list (MPSC)
+ */
+
+struct PoolNode {
+	PoolNode* next;
+	uint32_t owner_tid;
+};
+
+struct ThreadArena {
+	std::atomic<PoolNode*> shared_head{nullptr};  // MPSC: others push here
+	PoolNode* local_head = nullptr;                // only owner accesses
 };
 
 template <typename T>
-struct PoolState {
-	static std::atomic<Node*> ghead;
-	static thread_local Node* lhead;
-	static thread_local std::size_t lcount;
+struct ArenaPool {
+	static constexpr int kMaxThreads = 128;
+	static inline std::atomic<uint32_t> tid_counter{0};
+	static inline ThreadArena arenas[kMaxThreads];
+
+	static inline thread_local bool tid_initialized = false;
+	static inline thread_local uint32_t my_tid = 0;
+
+	static inline uint32_t get_tid() {
+		if (!tid_initialized) {
+			my_tid = tid_counter.fetch_add(1, std::memory_order_relaxed);
+			tid_initialized = true;
+		}
+		return my_tid;
+	}
+
+	static inline ThreadArena& my_arena() {
+		return arenas[get_tid()];
+	}
 };
-
-template <typename T>
-std::atomic<Node*> PoolState<T>::ghead{nullptr};
-
-template <typename T>
-thread_local Node* PoolState<T>::lhead = nullptr;
-
-template <typename T>
-thread_local std::size_t PoolState<T>::lcount = 0;
 
 template <typename T>
 struct PoolAllocator {
@@ -37,84 +57,37 @@ struct PoolAllocator {
 	template <typename U>
 	PoolAllocator(const PoolAllocator<U>&) noexcept {}
 
-	static constexpr std::size_t kFlush = 1u << 20;
-
-	static T* pop_local() {
-		using ST = PoolState<T>;
-		Node* n = ST::lhead;
-		if (!n) {
-			return nullptr;
-		}
-		ST::lhead = n->next;
-		ST::lcount--;
-		return reinterpret_cast<T*>(n);
-	}
-
-	static T* pop_global() {
-		using ST = PoolState<T>;
-		Node* head = ST::ghead.load(std::memory_order_acquire);
-		while (head) {
-			Node* next = head->next;
-			if (ST::ghead.compare_exchange_weak(
-					head, next,
-					std::memory_order_acq_rel,
-					std::memory_order_acquire)) {
-				return reinterpret_cast<T*>(head);
-			}
-		}
-		return nullptr;
-	}
-
-	static void push_local(T* p) {
-		using ST = PoolState<T>;
-		Node* n = reinterpret_cast<Node*>(p);
-		n->next = ST::lhead;
-		ST::lhead = n;
-		ST::lcount++;
-	}
-
-	static void push_global(Node* n) {
-		using ST = PoolState<T>;
-		Node* head = ST::ghead.load(std::memory_order_relaxed);
-		do {
-			n->next = head;
-		} while (!ST::ghead.compare_exchange_weak(
-				head, n,
-				std::memory_order_release,
-				std::memory_order_relaxed));
-	}
-
-	static void flush_local() {
-		using ST = PoolState<T>;
-		while (ST::lcount > kFlush / 2) {
-			Node* n = ST::lhead;
-			if (!n) {
-				break;
-			}
-			ST::lhead = n->next;
-			ST::lcount--;
-			push_global(n);
-		}
-	}
-
 	T* allocate(std::size_t n) {
 		if (n > 1) {
-			return static_cast<T*>(
-				::operator new(n * sizeof(T)));
+			return static_cast<T*>(::operator new(n * sizeof(T)));
 		}
 
-		if (T* p = pop_local()) {
-			return p;
-		}
-		if (T* p = pop_global()) {
-			return p;
+		using Pool = ArenaPool<T>;
+		ThreadArena& arena = Pool::my_arena();
+
+		// 1. Pop from local list
+		if (arena.local_head) {
+			PoolNode* node = arena.local_head;
+			arena.local_head = node->next;
+			return reinterpret_cast<T*>(node);
 		}
 
+		// 2. Bulk steal from shared list (atomic_exchange)
+		PoolNode* stolen = arena.shared_head.exchange(
+			nullptr, std::memory_order_acquire);
+		if (stolen) {
+			arena.local_head = stolen->next;
+			return reinterpret_cast<T*>(stolen);
+		}
+
+		// 3. Allocate new
 		std::size_t sz = sizeof(T);
-		if (sz < sizeof(Node)) {
-			sz = sizeof(Node);
+		if (sz < sizeof(PoolNode)) {
+			sz = sizeof(PoolNode);
 		}
-		return static_cast<T*>(::operator new(sz));
+		PoolNode* node = static_cast<PoolNode*>(::operator new(sz));
+		node->owner_tid = Pool::get_tid();
+		return reinterpret_cast<T*>(node);
 	}
 
 	void deallocate(T* p, std::size_t n) {
@@ -126,10 +99,19 @@ struct PoolAllocator {
 			return;
 		}
 
-		push_local(p);
-		if (PoolState<T>::lcount >= kFlush) {
-			flush_local();
-		}
+		using Pool = ArenaPool<T>;
+		PoolNode* node = reinterpret_cast<PoolNode*>(p);
+		ThreadArena& owner_arena = Pool::arenas[node->owner_tid];
+
+		// CAS push to owner's shared list (MPSC pattern)
+		PoolNode* head = owner_arena.shared_head.load(
+			std::memory_order_relaxed);
+		do {
+			node->next = head;
+		} while (!owner_arena.shared_head.compare_exchange_weak(
+			head, node,
+			std::memory_order_release,
+			std::memory_order_relaxed));
 	}
 
 	template <typename U>
