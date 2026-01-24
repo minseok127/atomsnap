@@ -588,7 +588,7 @@ Config:
 - payload=64 bytes
 - updates/s = unlimited
 - critical-section(cs) delay: 0us, 10us, 100us
-- urcu reclamation: async (call_rcu)
+- `urcu` reclamation: async (`call_rcu`)
 
 #### A-1) shards=1
 
@@ -633,6 +633,7 @@ Config:
 - critical-section(cs) delay = 200ns
 - payload=64 bytes
 - updates/s throttled: 100k, 500k, 1M, 2M, and unlimited
+- `urcu` reclamation: async (`call_rcu`)
 
 #### B-1) shards=1
 
