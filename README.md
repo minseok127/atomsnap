@@ -1,6 +1,6 @@
 # ATOMSNAP
 
-This library is a lock-free concurrency primitive for managing shared objects with multiple versions. It allows multiple readers and writers to access a shared pointer simultaneously without blocking, ensuring system-wide progress and low latency.
+A lock-free concurrency library for managing shared objects with multiple versions. Multiple readers and writers can access a shared pointer simultaneously without blocking. All operations complete in a bounded number of steps regardless of other threads' state.
 
 # Use Cases
 
@@ -27,7 +27,7 @@ $ cd atomsnap
 $ make
 ```
 
-This produces:
+Output:
 - `libatomsnap.a` - Static library
 - `libatomsnap.so` - Shared library
 - `atomsnap.h` - Public header file
@@ -45,12 +45,12 @@ $ make BUILD_MODE=debug
 
 # Architecture
 
-## Core Concepts
+## Implementation
 
 ### 1. Control Block Layout (64-bit)
 
-The core atomic variable is a 64-bit control block that packs both the reference count and the version handle.
-This ensures that reading the pointer and incrementing the reference count happen in a single atomic instruction.
+The control block is a 64-bit atomic variable containing the reference count and version handle.
+Reading the pointer and incrementing the reference count occur in a single atomic instruction.
 
 ```
 +--------------------+----------------------+
@@ -65,15 +65,14 @@ This ensures that reading the pointer and incrementing the reference count happe
 
 ### 2. Handle Structure (32-bit)
 
-The 32-bit handle uniquely identifies a version slot within the global memory space.
+The 32-bit handle identifies a version slot in the global memory space.
 
 - **Arena Index (20-bit)**: Identifies the arena in the global table (0 ~ 1,048,575).
 - **Slot Index (12-bit)**: Identifies the slot index within the arena (0 ~ 4,095).
 
 ### 3. Memory Arena & Page Alignment
 
-Memory is managed in Arenas, which are contiguous blocks of pre-allocated
-version slots.
+Arenas are contiguous blocks of pre-allocated version slots.
 
 - **Page Alignment**: Each arena is designed to fit within **32 memory pages**
   (4KB pages).
@@ -88,8 +87,7 @@ Formula:
 - `32 * 4096B = 131,072B`
 - Wasted: `24B` per arena
 
-> Note: `SLOTS_PER_ARENA` may change if the internal version layout changes,
-> while maintaining the 32-page arena goal.
+> Note: `SLOTS_PER_ARENA` depends on `sizeof(atomsnap_version)`. The 32-page arena size is fixed.
 
 **Free List Design**:
 - MPSC lock-free stack operation
@@ -99,34 +97,32 @@ Formula:
 
 ### 4. Reference Counting Logic
 
-Atomsnap uses a dual-layer accounting scheme:
+Atomsnap uses two reference counters:
 
-- **Outer RefCount (32-bit)** lives in the Gate's Control Block
-  (upper 32 bits of a 64-bit atomic). Each acquire increments this value.
+- **Outer RefCount (32-bit)**: Stored in the upper 32 bits of the gate's 64-bit control block.
+  Each acquire increments this value.
 
-- **Inner State (64-bit)** lives in each Version:
-  `[32-bit Counter | 32-bit Flags]`.
+- **Inner State (64-bit)**: Stored in each version as `[32-bit Counter | 32-bit Flags]`.
 
 Readers increment **only the counter** (upper 32 bits) on release, so the
 lower 32-bit flags are never affected by carry/overflow.
 
-When a writer publishes a new version (exchange / CAS success), it **detaches**
-the old version and **atomically adjusts** the inner counter by subtracting the
-accumulated outer refcount. A version is eligible for reclamation only when:
+When a writer publishes a new version (exchange / CAS success), it detaches
+the old version and atomically subtracts the accumulated outer refcount from
+the inner counter. A version is reclaimed when:
 
 - `DETACHED` flag is set, and
-- inner counter becomes `0`.
+- inner counter equals `0`.
 
-Reclamation is claimed via a `FINALIZED` flag to guarantee the free callback
-runs exactly once even under contention.
+The `FINALIZED` flag ensures the free callback runs exactly once.
 
-> Note: The 32-bit counters can wrap around by definition, but wrap-around
-> cannot cause premature reclamation because reclamation is gated by `DETACHED`
-> and finalized via `FINALIZED`.
+> Note: The 32-bit counters can wrap around, but wrap-around cannot cause
+> premature reclamation. Reclamation requires the `DETACHED` flag and is
+> completed atomically via the `FINALIZED` flag.
 
 ### 5. Reclamation Algorithm (Outer RefCount + Inner State)
 
-**Lifecycle**:
+**Operation Sequence**:
 
 1. Writer allocates a version from the arena.
 2. Writer sets the payload pointer and publishes it via `exchange` / `CAS`.
@@ -145,10 +141,10 @@ runs exactly once even under contention.
 ## Data Structures
 
 ### atomsnap_gate
-Synchronization point managing versioned objects. Supports multiple independent control block slots for managing separate version chains within a single gate.
+Contains one or more control block slots. Each slot manages an independent version chain.
 
 ### atomsnap_version
-Represents a specific version of an object.
+A version of an object.
 
 **Fields**:
 - `object` - User payload pointer
@@ -231,9 +227,9 @@ Configuration for gate initialization.
 
 ## Basic Example
 
-### Problem Statement
+### Problem
 
-Multiple writers need to update a shared object that requires multiple fields to be modified atomically. The object is too large for a single atomic instruction. Readers must always see a fully consistent state—never partially updated values.
+Multiple writers update a shared object larger than 8 bytes. All fields must be modified atomically. Readers must see consistent state.
 ```cpp
 struct Data {
     int64_t value1;
@@ -241,7 +237,7 @@ struct Data {
 };
 ```
 
-### Solution with ATOMSNAP
+### Implementation
 
 #### 1. Initialize the Gate
 ```cpp
@@ -380,7 +376,7 @@ if (!atomsnap_compare_exchange_version(gate, old_ver, new_ver)) {
 atomsnap_release_version(old_ver);  // ✓ Released after CAS
 ```
 
-**Why?** Releasing old_ver before CAS allows its handle to be recycled. If another thread creates a new version with the same handle, CAS may incorrectly succeed.
+Releasing old_ver before CAS allows its handle to be recycled. If another thread creates a new version with the same handle, CAS may incorrectly succeed.
 
 ## Memory Leak on CAS Failure
 
@@ -552,17 +548,17 @@ Configuration: 16 Readers, 1 Writer
 | 1R/16W | shared_mutex | spinlock |
 | 16R/1W | atomsnap | atomsnap |
 
-Trade-offs:
-- **spinlock**: Highest writer throughput in CAS scenarios. Reader throughput degrades under high contention. Not suitable for read-heavy workloads with many threads.
-- **shared_mutex**: Good reader scaling under contention. Severe writer starvation in read-heavy scenarios (writer throughput approaches zero).
-- **shared_ptr**: Moderate throughput. Does not scale well with thread count. Throughput decreases as contention increases.
-- **atomsnap**: Consistent scaling for both readers and writers. Highest reader throughput in read-heavy scenarios. Writer throughput is lower than spinlock but does not starve.
+**Characteristics**:
+- **spinlock**: Highest writer throughput in CAS scenarios. Reader throughput decreases under high contention.
+- **shared_mutex**: Reader throughput scales with thread count. Writer starvation occurs in read-heavy scenarios.
+- **shared_ptr**: Throughput decreases as thread count increases.
+- **atomsnap**: Reader and writer throughput scale with thread count. No starvation.
 
 ## Benchmark 2: atomsnap vs liburcu (RCU, urcu-memb)
 
 This benchmark compares `atomsnap` against `liburcu` (`urcu-memb` flavor).
 
-**Comparison dimensions**
+**Comparison**
 - Read-side latency (per-op overhead)
 - Writer throughput under reader stalls
 - Memory usage (RSS) under varying conditions
@@ -681,8 +677,8 @@ Reader throughput vs update rate (shards=8):
 | RSS variation with CS delay | 7.0–7.3x increase | None |
 | RSS variation with update rate | 5.0–34.5MB | 20.5–20.8MB |
 
-Trade-offs:
-- **urcu**: Lower read-side latency (5.6x lower than `atomsnap` at shards=1). Higher reader throughput at CS=0us (1.4x higher at shards=8). Memory usage increases with reader critical section length and update rate.
-- **atomsnap**: Higher read-side latency due to atomic refcount operations. Constant memory usage regardless of reader critical section length or update rate. Higher writer throughput when readers hold versions for extended periods (1.9x higher at CS=100us).
+**Characteristics**:
+- **urcu**: Read-side latency 5.6x lower than `atomsnap` at shards=1. Reader throughput 1.4x higher at CS=0us with shards=8. Memory usage increases with critical section length and update rate.
+- **atomsnap**: Read-side latency higher due to atomic refcount operations. Memory usage constant regardless of critical section length or update rate. Writer throughput 1.9x higher at CS=100us.
 
 ---
