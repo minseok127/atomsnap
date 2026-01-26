@@ -114,11 +114,10 @@ the inner counter. A version is reclaimed when:
 - `DETACHED` flag is set, and
 - inner counter equals `0`.
 
-The `FINALIZED` flag ensures the free callback runs exactly once.
-
 > Note: The 32-bit counters can wrap around, but wrap-around cannot cause
-> premature reclamation. Reclamation requires the `DETACHED` flag and is
-> completed atomically via the `FINALIZED` flag.
+> premature reclamation because reclamation requires the `DETACHED` flag.
+
+**Consistency verification**: The `FINALIZED` flag is used to ensure the free callback runs exactly once. This flag is not required for the reclamation algorithm itself.
 
 ### 5. Reclamation Algorithm (Outer RefCount + Inner State)
 
@@ -131,8 +130,7 @@ The `FINALIZED` flag ensures the free callback runs exactly once.
 4. After publishing, the writer detaches the old version and atomically adjusts
    its inner counter by subtracting the accumulated outer refcount.
 5. Readers release by incrementing the inner counter (upper 32 bits only).
-6. When `DETACHED && counter == 0`, a thread claims `FINALIZED` and runs the
-   free callback exactly once, then returns the slot to the arena.
+6. When `DETACHED && counter == 0`, a thread runs the free callback and returns the slot to the arena. The `FINALIZED` flag prevents duplicate callback invocations.
 
 ---
 
@@ -440,28 +438,28 @@ atomsnap_release_version(ver2);
 - Payload: `struct Data { int64_t value1; int64_t value2; }` (16 bytes)
 
 **Invariant**
-- Readers verify `value1 == value2` on every read.
-- In CAS tests, readers also verify monotonicity (value never decreases).
+- Experiment A: Readers verify `value1 == value2` on every read.
+- Experiment B, C: Readers verify `value1 == value2` and monotonicity (value never decreases).
 
 **Measurement**
 - All threads start together via a barrier.
 - Reader op: acquire → read/verify → release.
-- Writer op (TAS): one `exchange` operation.
-- Writer op (CAS): one successful `compare_exchange`; failed attempts are not counted.
+- Writer op (Experiment A): one write operation per measurement.
+- Writer op (Experiment B, C): one successful write that maintains monotonicity; failed attempts are not counted.
 - Throughput = total ops / duration.
 
 **Baselines**
 
 | Baseline | Update Pattern | Experiments |
 |----------|----------------|-------------|
-| `atomsnap` | copy-on-write (allocate new version, publish atomically) | TAS, CAS |
-| `std::shared_ptr` | copy-on-write (allocate new object, atomic store/CAS) | TAS, CAS |
-| `shared_mutex` | in-place update (exclusive lock for write, shared lock for read) | CAS only |
-| `spinlock` | in-place update (exclusive lock for both read and write) | CAS only |
+| `atomsnap` | copy-on-write (allocate new version, publish atomically) | A, B, C |
+| `std::shared_ptr` | copy-on-write (allocate new object, atomic store/CAS) | A, B, C |
+| `shared_mutex` | in-place update (exclusive lock for write, shared lock for read) | B, C |
+| `spinlock` | in-place update (exclusive lock for both read and write) | B, C |
 
 Note: `shared_mutex` and `spinlock` modify the existing object directly under lock, while `atomsnap` and `shared_ptr` allocate a new object for each update. This difference affects allocation overhead and cache behavior.
 
-### Experiment A: TAS (unconditional exchange)
+### Experiment A: Consistency Only
 
 Reader Throughput (ops/sec)
 
@@ -481,13 +479,13 @@ Writer Throughput (ops/sec)
 | 4/4             | 1,273,549       | 6,646,504 |
 | 8/8             | 1,193,263       | 7,416,587 |
 
-**Observations (TAS)**
+**Observations (Consistency Only)**
 
 - `atomsnap` reader throughput increases with thread count (8.9M → 16.2M). `shared_ptr` reader throughput decreases (4.6M → 2.8M).
 - `atomsnap` writer throughput increases with thread count (4.2M → 7.4M). `shared_ptr` writer throughput decreases (2.2M → 1.2M).
 - At 8/8 configuration, `atomsnap` achieves 5.8x reader throughput and 6.2x writer throughput compared to `shared_ptr`.
 
-### Experiment B: CAS (conditional compare_exchange with retry)
+### Experiment B: Consistency + Monotonicity
 
 Reader Throughput (ops/sec)
 
@@ -507,7 +505,7 @@ Writer Throughput (ops/sec)
 | 4/4             | 27,958       | 972,971    | 3,962,019  | 2,894,568 |
 | 8/8             | 8,882        | 1,054,694  | 2,639,648  | 2,091,873 |
 
-**Observations (CAS)**
+**Observations (Consistency + Monotonicity)**
 
 - Reader throughput at 1/1: `spinlock` (13.9M) > `atomsnap` (8.7M) > `shared_ptr` (4.3M) > `shared_mutex` (0.5M).
 - Reader throughput at 8/8: `atomsnap` (18.5M) > `shared_mutex` (17.1M) > `spinlock` (4.1M) > `shared_ptr` (2.3M).
@@ -515,7 +513,7 @@ Writer Throughput (ops/sec)
 - `spinlock` reader throughput decreases from 13.9M to 4.1M as thread count increases. `atomsnap` and `shared_mutex` reader throughput increase.
 - `shared_mutex` writer throughput drops to near-zero (8,882 ops/sec) at 8/8 due to writer starvation under read-heavy contention.
 
-### Experiment C: Unbalanced workloads (CAS)
+### Experiment C: Unbalanced Reader/Writer Ratio
 
 Configuration: 1 Reader, 16 Writers
 
@@ -542,14 +540,14 @@ Configuration: 16 Readers, 1 Writer
 
 | Scenario | Highest Reader Throughput | Highest Writer Throughput |
 |----------|---------------------------|---------------------------|
-| TAS (all configs) | atomsnap | atomsnap |
-| CAS 1/1 | spinlock | spinlock |
-| CAS 8/8 | atomsnap | spinlock |
+| Consistency Only (all configs) | atomsnap | atomsnap |
+| Consistency + Monotonicity 1/1 | spinlock | spinlock |
+| Consistency + Monotonicity 8/8 | atomsnap | spinlock |
 | 1R/16W | shared_mutex | spinlock |
 | 16R/1W | atomsnap | atomsnap |
 
 **Characteristics**:
-- **spinlock**: Highest writer throughput in CAS scenarios. Reader throughput decreases under high contention.
+- **spinlock**: Highest writer throughput in Experiment B. Reader throughput decreases under high contention.
 - **shared_mutex**: Reader throughput scales with thread count. Writer starvation occurs in read-heavy scenarios.
 - **shared_ptr**: Throughput decreases as thread count increases.
 - **atomsnap**: Reader and writer throughput scale with thread count. No starvation.
