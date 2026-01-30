@@ -1,6 +1,6 @@
 # ATOMSNAP
 
-A lock-free concurrency library for managing shared objects with multiple versions. Multiple readers and writers can access a shared pointer simultaneously without blocking. All operations complete in a bounded number of steps regardless of other threads' state.
+A lock-free concurrency library for managing shared objects with multiple versions. Multiple readers and writers can access a shared pointer simultaneously without blocking.
 
 # Use Cases
 
