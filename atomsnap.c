@@ -48,10 +48,17 @@
 #include <inttypes.h>
 #include <stdbool.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include "atomsnap.h"
 
-#define PAGE_SIZE             (4096)
+/*
+ * CONTROL_BLOCK_ALIGN: 128 bytes
+ * Every acquire writes its control block, so each control block gets its
+ * own 128-byte block. 64 is not enough on x86, where adjacent cache lines
+ * are prefetched in 128-byte aligned pairs.
+ */
+#define CONTROL_BLOCK_ALIGN   (128)
 
 /*
  * MAX_THREADS: 1,048,576 (2^20)
@@ -157,7 +164,8 @@ static inline uint32_t inner_flags(uint64_t s)
  *
  * @object:        Public-facing pointer to the user object.
  * @free_context:  User-defined context for the free function.
- * @gate:          Pointer to the gate this version belongs to.
+ * @free_impl:     Free callback copied from the gate at creation, so the
+ *                 version can be reclaimed after the gate is destroyed.
  * @inner_state:   [32-bit Counter | 32-bit Flags] for reclamation.
  * @self_handle:   Handle identifying this version (when allocated).
  * @next_handle:   Handle to the next node in the stack (when freed).
@@ -165,7 +173,7 @@ static inline uint32_t inner_flags(uint64_t s)
  * [ Memory Layout ]
  * 00-08: object (8B)
  * 08-16: free_context (8B)
- * 16-24: gate (8B)
+ * 16-24: free_impl (8B)
  * 24-32: inner_state (8B)
  * 32-36: self_handle / next_handle (4B)
  * 36-40: padding (4B)
@@ -173,7 +181,7 @@ static inline uint32_t inner_flags(uint64_t s)
 struct atomsnap_version {
 	_Atomic(void *) object;
 	void *free_context;
-	struct atomsnap_gate *gate;
+	atomsnap_free_func free_impl;
 	_Atomic(uint64_t) inner_state;
 	union {
 		uint32_t self_handle;
@@ -214,22 +222,36 @@ struct thread_context {
 };
 
 /*
+ * control_block - 64-bit atomic [RefCnt | Handle] of one slot.
+ *
+ * Aligned to CONTROL_BLOCK_ALIGN so that no two slots share a cache line.
+ */
+struct control_block {
+	_Alignas(CONTROL_BLOCK_ALIGN) _Atomic(uint64_t) value;
+};
+
+/*
  * atomsnap_gate - Gate structure.
  *
- * @control_block:        64-bit atomic [RefCnt | Handle].
- * @free_impl:            User callback for object cleanup.
- * @extra_control_blocks: Array for multi-slot gates.
- * @num_extra_slots:      Number of extra slots.
+ * The fields before @control_blocks are read-only after initialization and
+ * sit in their own CONTROL_BLOCK_ALIGN bytes. A slot's control block is at
+ * a fixed offset from the gate pointer.
+ *
+ * @free_impl:       User callback for object cleanup.
+ * @num_extra_slots: Number of extra slots.
+ * @control_blocks:  Control blocks of slot 0 .. num_extra_slots.
  */
 struct atomsnap_gate {
-	_Atomic(uint64_t) control_block;
 	atomsnap_free_func free_impl;
-	_Atomic(uint64_t) *extra_control_blocks;
 	int num_extra_slots;
+	struct control_block control_blocks[];
 };
 
 /*
  * Global Variables
+ *
+ * Static storage is zero-initialized. Do not memset() these tables at
+ * runtime: that writes every page (17 MiB) and keeps it resident.
  */
 static struct memory_arena *g_arena_table[MAX_ARENAS];
 static _Atomic(size_t) g_global_arena_cnt = 0;
@@ -239,6 +261,9 @@ static _Atomic(bool) g_tid_used[MAX_THREADS];
 
 static pthread_key_t g_tls_key;
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
+
+/* Arena mapping size: sizeof(struct memory_arena) rounded up to pages */
+static size_t g_arena_map_size;
 
 /*
  * Forward Declarations
@@ -329,7 +354,11 @@ static bool reclaim_last_arena_if_empty(struct thread_context *ctx)
 	 * have been returned to the arena's stack.
 	 */
 	if (depth == (SLOTS_PER_ARENA - 1)) {
-		madvise(arena, sizeof(struct memory_arena), MADV_DONTNEED);
+		/*
+		 * Covers exactly the arena's own mapping (see init_arena),
+		 * so no neighboring memory is zeroed.
+		 */
+		madvise(arena, g_arena_map_size, MADV_DONTNEED);
 		ctx->active_arena_count--;
 		return true;
 	}
@@ -374,13 +403,20 @@ static void tls_destructor(void *arg)
  */
 static void global_init_routine(void)
 {
+	long ret;
+	size_t page_size;
+
 	if (pthread_key_create(&g_tls_key, tls_destructor) != 0) {
 		errmsg("Failed to create pthread key\n");
 		exit(EXIT_FAILURE);
 	}
-	memset(g_arena_table, 0, sizeof(g_arena_table));
-	memset(g_thread_contexts, 0, sizeof(g_thread_contexts));
-	memset(g_tid_used, 0, sizeof(g_tid_used));
+
+	/* Arenas are mapped in whole pages (see init_arena) */
+	ret = sysconf(_SC_PAGESIZE);
+	page_size = (ret > 0) ? (size_t)ret : 4096;
+
+	g_arena_map_size = (sizeof(struct memory_arena) + page_size - 1) &
+		~(page_size - 1);
 }
 
 /**
@@ -428,17 +464,25 @@ static int ensure_vector_capacity(struct thread_context *ctx)
 
 	new_cap = ctx->vector_capacity == 0 ? 4 : ctx->vector_capacity * 2;
 
+	/*
+	 * Store each result right away: a successful realloc() may have freed
+	 * the old block. If the second one fails, owned_arenas is just larger
+	 * than vector_capacity, which is harmless.
+	 */
 	new_arenas = realloc(ctx->owned_arenas,
 		new_cap * sizeof(struct memory_arena *));
-	new_indices = realloc(ctx->arena_indices,
-		new_cap * sizeof(uint32_t));
-
-	if (!new_arenas || !new_indices) {
+	if (new_arenas == NULL) {
 		errmsg("Failed to expand arena vector\n");
 		return -1;
 	}
-
 	ctx->owned_arenas = new_arenas;
+
+	new_indices = realloc(ctx->arena_indices,
+		new_cap * sizeof(uint32_t));
+	if (new_indices == NULL) {
+		errmsg("Failed to expand arena vector\n");
+		return -1;
+	}
 	ctx->arena_indices = new_indices;
 
 	/* Initialize new slots to NULL */
@@ -513,6 +557,14 @@ static int init_arena(struct thread_context *ctx)
 		arena = ctx->owned_arenas[ctx->active_arena_count];
 		arena_idx = ctx->arena_indices[ctx->active_arena_count];
 	} else {
+		/*
+		 * Ensure vector capacity before allocating, so that a failure
+		 * does not leak an arena already registered in the table.
+		 */
+		if (ensure_vector_capacity(ctx) != 0) {
+			return -1;
+		}
+
 		/* Allocate New Global Arena */
 		arena_idx = atomic_fetch_add(&g_global_arena_cnt, 1);
 		if (arena_idx >= MAX_ARENAS) {
@@ -520,20 +572,19 @@ static int init_arena(struct thread_context *ctx)
 			return -1;
 		}
 
-		arena = aligned_alloc(PAGE_SIZE, sizeof(struct memory_arena));
-		if (!arena) {
+		/*
+		 * Anonymous mapping of whole pages (zero-filled), so that the
+		 * madvise() in reclaim_last_arena_if_empty() stays inside it.
+		 */
+		arena = mmap(NULL, g_arena_map_size, PROT_READ | PROT_WRITE,
+			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (arena == MAP_FAILED) {
 			errmsg("Memory allocation failed for new arena\n");
 			return -1;
 		}
-		memset(arena, 0, sizeof(struct memory_arena));
 
 		/* Register in global table */
 		g_arena_table[arena_idx] = arena;
-
-		/* Ensure vector capacity */
-		if (ensure_vector_capacity(ctx) != 0) {
-			return -1;
-		}
 
 		ctx->owned_arenas[ctx->active_arena_count] = arena;
 		ctx->arena_indices[ctx->active_arena_count] =
@@ -603,7 +654,7 @@ static uint32_t pop_local(struct thread_context *ctx)
  *
  * @return  Handle of the allocated slot, or HANDLE_NULL on failure.
  */
-static uint64_t alloc_slot(struct thread_context *ctx)
+static uint32_t alloc_slot(struct thread_context *ctx)
 {
 	uint32_t handle, sentinel_handle;
 	struct memory_arena *arena;
@@ -705,8 +756,8 @@ static inline void finalize_and_free(struct atomsnap_version *ver)
 
 	obj = atomic_load_explicit(&ver->object, memory_order_relaxed);
 
-	if (ver->gate && ver->gate->free_impl) {
-		ver->gate->free_impl(obj, ver->free_context);
+	if (ver->free_impl) {
+		ver->free_impl(obj, ver->free_context);
 	}
 
 	free_slot(ver);
@@ -718,7 +769,8 @@ static inline void finalize_and_free(struct atomsnap_version *ver)
  * A thread claims FINALIZED before reclaiming. If FINALIZED is already
  * set, another thread reclaimed it.
  *
- * Define ATOMSNAP_DISABLE_FINALIZE_CHECK to ignore duplicates.
+ * Define ATOMSNAP_DISABLE_FINALIZE_CHECK to skip a duplicate instead of
+ * aborting.
  */
 static inline void try_finalize(struct atomsnap_version *ver, uint64_t state)
 {
@@ -738,8 +790,13 @@ static inline void try_finalize(struct atomsnap_version *ver, uint64_t state)
 		(uint64_t)INNER_F_FINALIZED, memory_order_acq_rel);
 
 	if ((uint32_t)old & INNER_F_FINALIZED) {
+#ifdef ATOMSNAP_DISABLE_FINALIZE_CHECK
+		/* Another thread already reclaimed it, skip the duplicate */
+		return;
+#else
 		errmsg("Double finalize detected\n");
 		abort();
+#endif
 	}
 
 	finalize_and_free(ver);
@@ -848,6 +905,7 @@ static int atomsnap_thread_init_internal(void)
 	/* 3. Set TLS */
 	if (pthread_setspecific(g_tls_key, ctx) != 0) {
 		errmsg("Failed to set TLS value\n");
+		atomic_store(&g_tid_used[tid], false);
 		return -1;
 	}
 
@@ -863,9 +921,25 @@ static int atomsnap_thread_init_internal(void)
  */
 struct atomsnap_gate *atomsnap_init_gate(struct atomsnap_init_context *ctx)
 {
-	struct atomsnap_gate *gate = calloc(1, sizeof(struct atomsnap_gate));
+	struct atomsnap_gate *gate;
+	size_t num_slots;
 	int i;
 
+	if (ctx == NULL || ctx->num_extra_control_blocks < 0) {
+		errmsg("Invalid init context\n");
+		return NULL;
+	}
+
+	if (ctx->free_impl == NULL) {
+		errmsg("Invalid free function\n");
+		return NULL;
+	}
+
+	num_slots = (size_t)ctx->num_extra_control_blocks + 1;
+
+	/* Header and control blocks are multiples of the alignment (C11) */
+	gate = aligned_alloc(CONTROL_BLOCK_ALIGN, sizeof(struct atomsnap_gate) +
+		num_slots * sizeof(struct control_block));
 	if (gate == NULL) {
 		errmsg("Gate allocation failed\n");
 		return NULL;
@@ -874,29 +948,10 @@ struct atomsnap_gate *atomsnap_init_gate(struct atomsnap_init_context *ctx)
 	gate->free_impl = ctx->free_impl;
 	gate->num_extra_slots = ctx->num_extra_control_blocks;
 
-	if (gate->free_impl == NULL) {
-		errmsg("Invalid free function\n");
-		free(gate);
-		return NULL;
+	for (i = 0; i <= gate->num_extra_slots; i++) {
+		atomic_init(&gate->control_blocks[i].value,
+			(uint64_t)HANDLE_NULL);
 	}
-
-	if (gate->num_extra_slots > 0) {
-		gate->extra_control_blocks = calloc(gate->num_extra_slots,
-			sizeof(_Atomic(uint64_t)));
-
-		if (gate->extra_control_blocks == NULL) {
-			errmsg("Extra blocks allocation failed\n");
-			free(gate);
-			return NULL;
-		}
-
-		for (i = 0; i < gate->num_extra_slots; i++) {
-			atomic_init(&gate->extra_control_blocks[i],
-				(uint64_t)HANDLE_NULL);
-		}
-	}
-
-	atomic_init(&gate->control_block, (uint64_t)HANDLE_NULL);
 
 	return gate;
 }
@@ -904,17 +959,25 @@ struct atomsnap_gate *atomsnap_init_gate(struct atomsnap_init_context *ctx)
 /**
  * @brief   Destroy the atomsnap_gate.
  *
+ * Detaches the current version of every slot. Each one is freed here if no
+ * reader holds it, otherwise by its last release; versions keep their own
+ * free callback, so that is safe after the gate is freed. Must not be
+ * called concurrently with other operations on @gate.
+ *
  * @param   gate: Gate to destroy.
  */
 void atomsnap_destroy_gate(struct atomsnap_gate *gate)
 {
+	int i;
+
 	if (gate == NULL) {
 		return;
 	}
 
-	if (gate->extra_control_blocks) {
-		free(gate->extra_control_blocks);
+	for (i = 0; i <= gate->num_extra_slots; i++) {
+		atomsnap_exchange_version_slot(gate, i, NULL);
 	}
+
 	free(gate);
 }
 
@@ -945,10 +1008,13 @@ struct atomsnap_version *atomsnap_make_version(struct atomsnap_gate *gate)
 	slot = resolve_handle(handle);
 	assert(slot != NULL);
 
-	/* Initialize slot */
-	slot->object = NULL;
+	/*
+	 * Initialize slot. Relaxed stores are enough: readers reach this
+	 * version only through the release in exchange/compare_exchange.
+	 */
+	atomic_store_explicit(&slot->object, NULL, memory_order_relaxed);
 	slot->free_context = NULL;
-	slot->gate = gate;
+	slot->free_impl = gate ? gate->free_impl : NULL;
 
 	atomic_store_explicit(&slot->inner_state, 0, memory_order_relaxed);
 
@@ -974,8 +1040,8 @@ void atomsnap_free_version(struct atomsnap_version *version)
 
 	obj = atomic_load_explicit(&version->object, memory_order_relaxed);
 
-	if (version->gate && version->gate->free_impl) {
-		version->gate->free_impl(obj, version->free_context);
+	if (version->free_impl) {
+		version->free_impl(obj, version->free_context);
 	}
 
 	free_slot(version);
@@ -1017,8 +1083,8 @@ void *atomsnap_get_object(const struct atomsnap_version *ver)
 static inline _Atomic(uint64_t) *get_cb_slot(struct atomsnap_gate *gate,
 	int idx)
 {
-	return (idx == 0) ? &gate->control_block :
-		&gate->extra_control_blocks[idx - 1];
+	assert(idx >= 0 && idx <= gate->num_extra_slots);
+	return &gate->control_blocks[idx].value;
 }
 
 /**
@@ -1161,4 +1227,3 @@ bool atomsnap_compare_exchange_version_slot(struct atomsnap_gate *gate,
 
 	return true;
 }
-
